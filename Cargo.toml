@@ -1,0 +1,93 @@
+[workspace]
+resolver = "2"
+members = [
+  "subduction_backend_apple",
+  "subduction_backend_web",
+  "subduction_backend_windows",
+  "subduction_backend_android",
+  "subduction_backend_wayland",
+  "subduction_backend_x11",
+  "subduction_core",
+  "subduction_debug",
+  "subduction_render",
+  "subduction_sync_harness",
+  "examples/lotta_layers_common",
+  "examples/macos_layers",
+  "examples/macos_lotta_layers",
+  "examples/macos_wgpu",
+  "examples/trace_demo",
+  "examples/web_layers",
+  "examples/web_video",
+  "examples/web_lotta_layers",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+# Keep in sync with RUST_MIN_VER in .github/workflows/ci.yml and package README.md files.
+rust-version = "1.88"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/forest-rs/subduction"
+
+[workspace.dependencies]
+subduction_core = { path = "subduction_core" }
+subduction_sync_harness = { path = "subduction_sync_harness" }
+kurbo = { version = "0.13", default-features = false, features = ["libm"] }
+understory_dirty = { git = "https://github.com/endoli/understory.git", rev = "e66fecdc521b57b76bb3b28ddc70ce3944926664" }
+wasm-bindgen = "0.2"
+web-sys = "0.3"
+
+[workspace.lints]
+# LINEBENDER LINT SET - Cargo.toml - v7
+rust.unsafe_code = "deny"
+rust.keyword_idents_2024 = "forbid"
+rust.non_ascii_idents = "forbid"
+rust.non_local_definitions = "forbid"
+rust.unsafe_op_in_unsafe_fn = "forbid"
+
+rust.elided_lifetimes_in_paths = "warn"
+rust.missing_debug_implementations = "warn"
+rust.missing_docs = "warn"
+rust.trivial_numeric_casts = "warn"
+rust.unnameable_types = "warn"
+rust.unreachable_pub = "warn"
+rust.unused_import_braces = "warn"
+rust.unused_lifetimes = "warn"
+rust.unused_macro_rules = "warn"
+rust.unused_qualifications = "warn"
+
+clippy.too_many_arguments = "allow"
+
+clippy.allow_attributes_without_reason = "warn"
+clippy.cast_possible_truncation = "warn"
+clippy.collection_is_never_read = "warn"
+clippy.default_trait_access = "warn"
+clippy.dbg_macro = "warn"
+clippy.debug_assert_with_mut_call = "warn"
+clippy.doc_markdown = "warn"
+clippy.fn_to_numeric_cast_any = "warn"
+clippy.infinite_loop = "warn"
+clippy.large_stack_arrays = "warn"
+clippy.mismatching_type_param_order = "warn"
+clippy.missing_assert_message = "warn"
+clippy.missing_fields_in_debug = "warn"
+clippy.same_functions_in_if_condition = "warn"
+clippy.semicolon_if_nothing_returned = "warn"
+clippy.should_panic_without_expect = "warn"
+clippy.todo = "warn"
+clippy.unseparated_literal_suffix = "warn"
+clippy.use_self = "warn"
+
+clippy.cargo_common_metadata = "warn"
+clippy.negative_feature_names = "warn"
+clippy.redundant_feature_names = "warn"
+clippy.wildcard_dependencies = "warn"
+# END LINEBENDER LINT SET
+
+[profile.ci]
+inherits = "dev"
+debug = 0
+strip = "debuginfo"
+
+[profile.ci.package."*"]
+debug-assertions = true
