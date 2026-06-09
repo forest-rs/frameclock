@@ -75,7 +75,13 @@ impl AffineClock {
     ///
     /// On the first call, this sets the mapping exactly. Subsequent calls
     /// smooth the rate and offset via EMA.
+    ///
+    /// A non-finite `media_time` (NaN or infinity) is ignored, leaving the
+    /// mapping unchanged, so a single bad observation cannot poison the clock.
     pub fn update(&mut self, host_ticks: u64, media_time: f64) {
+        if !media_time.is_finite() {
+            return;
+        }
         if !self.initialized {
             // First observation: set mapping exactly.
             // offset = media_time - rate * host_ticks
@@ -185,21 +191,33 @@ mod tests {
     }
 
     #[test]
-    fn reset_recovers_from_nan_rate() {
+    fn ignores_non_finite_first_observation() {
+        let mut clock = AffineClock::new(1e-9, 0.1, 0.1);
+        // Garbage before any good observation must not initialize the clock.
+        clock.update(1_000_000_000, f64::NAN);
+        clock.update(1_000_000_000, f64::INFINITY);
+        assert!(clock.media_time_at(2_000_000_000).is_none());
+
+        // A finite observation still initializes normally.
+        clock.update(1_000_000_000, 1.0);
+        assert!(clock.media_time_at(2_000_000_000).is_some());
+    }
+
+    #[test]
+    fn ignores_non_finite_observation_after_init() {
         let mut clock = AffineClock::new(1e-9, 0.1, 0.1);
         clock.update(0, 0.0);
-        // A non-finite observation poisons the EMA rate.
-        clock.update(1_000_000_000, f64::NAN);
-        assert!(clock.media_time_at(2_000_000_000).unwrap().is_nan());
+        clock.update(1_000_000_000, 1.0);
+        let before = clock.media_time_at(2_000_000_000).unwrap();
 
-        clock.reset();
+        // Garbage observations leave the mapping untouched.
+        clock.update(2_000_000_000, f64::NAN);
+        clock.update(3_000_000_000, f64::INFINITY);
+        clock.update(4_000_000_000, f64::NEG_INFINITY);
+        assert_eq!(clock.media_time_at(2_000_000_000).unwrap(), before);
 
+        // A subsequent good observation is still applied.
         clock.update(2_000_000_000, 2.0);
-        clock.update(3_000_000_000, 3.0);
-        let mt = clock.media_time_at(4_000_000_000).unwrap();
-        assert!(
-            (mt - 4.0).abs() < 1e-6,
-            "expected ~4.0 after recovery, got {mt}"
-        );
+        assert!((clock.media_time_at(2_000_000_000).unwrap() - 2.0).abs() < 1e-6);
     }
 }
