@@ -21,6 +21,8 @@
 pub struct AffineClock {
     /// Current estimated rate (media seconds per host tick).
     rate: f64,
+    /// Initial rate supplied at construction, restored by [`reset`](Self::reset).
+    initial_rate: f64,
     /// Current estimated offset (media seconds).
     offset: f64,
     /// EMA smoothing factor for rate correction (0.0–1.0).
@@ -40,11 +42,14 @@ impl AffineClock {
     /// factors.
     ///
     /// `initial_rate` is in media-seconds per host-tick (e.g. for nanosecond
-    /// ticks, this would be `1e-9`).
+    /// ticks, this would be `1e-9`). It is also the rate that
+    /// [`reset`](Self::reset) restores, so the value chosen here sets the
+    /// post-reset baseline.
     #[must_use]
     pub fn new(initial_rate: f64, rate_alpha: f64, offset_alpha: f64) -> Self {
         Self {
             rate: initial_rate,
+            initial_rate,
             offset: 0.0,
             rate_alpha,
             offset_alpha,
@@ -102,9 +107,11 @@ impl AffineClock {
         self.last_media = media_time;
     }
 
-    /// Resets all accumulated state, requiring new observations before
-    /// queries return values.
+    /// Resets all accumulated state — including the rate, which is restored to
+    /// the value passed to [`new`](Self::new) — requiring new observations
+    /// before queries return values.
     pub fn reset(&mut self) {
+        self.rate = self.initial_rate;
         self.offset = 0.0;
         self.initialized = false;
         self.last_host = 0;
@@ -157,5 +164,42 @@ mod tests {
 
         clock.reset();
         assert!(clock.media_time_at(2_000_000_000).is_none());
+    }
+
+    #[test]
+    fn reset_restores_initial_rate() {
+        let mut clock = AffineClock::new(1e-9, 0.5, 0.5);
+        clock.update(0, 0.0);
+        // Drive media at twice the initial rate so the EMA drifts toward 2e-9.
+        for i in 1..=30_u64 {
+            clock.update(i * 1_000_000_000, 2.0 * i as f64);
+        }
+        assert!(
+            clock.rate > 1.5e-9,
+            "precondition: rate should have drifted up"
+        );
+
+        clock.reset();
+
+        assert_eq!(clock.rate, 1e-9, "reset must restore the initial rate");
+    }
+
+    #[test]
+    fn reset_recovers_from_nan_rate() {
+        let mut clock = AffineClock::new(1e-9, 0.1, 0.1);
+        clock.update(0, 0.0);
+        // A non-finite observation poisons the EMA rate.
+        clock.update(1_000_000_000, f64::NAN);
+        assert!(clock.media_time_at(2_000_000_000).unwrap().is_nan());
+
+        clock.reset();
+
+        clock.update(2_000_000_000, 2.0);
+        clock.update(3_000_000_000, 3.0);
+        let mt = clock.media_time_at(4_000_000_000).unwrap();
+        assert!(
+            (mt - 4.0).abs() < 1e-6,
+            "expected ~4.0 after recovery, got {mt}"
+        );
     }
 }
