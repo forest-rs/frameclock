@@ -1,9 +1,9 @@
-// Copyright 2026 the Subduction Authors
+// Copyright 2026 the Frameclock Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Internal bounded queue utilities.
 
-use std::collections::VecDeque;
+use alloc::collections::VecDeque;
 
 /// Bounded FIFO queue with a `drop_oldest` overflow policy.
 ///

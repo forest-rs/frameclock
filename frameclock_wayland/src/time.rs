@@ -1,7 +1,7 @@
-// Copyright 2026 the Subduction Authors
+// Copyright 2026 the Frameclock Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Wayland backend host clock selection and reads.
+//! Wayland host clock selection and reads.
 
 use frameclock::HostTime;
 use frameclock::time::Timebase;
@@ -9,7 +9,7 @@ use rustix::time::{ClockId as PosixClockId, Timespec, clock_gettime};
 
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
 
-/// Clock source used for backend timestamps.
+/// Clock source used for Wayland timing facts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum Clock {
     /// `CLOCK_MONOTONIC` fallback clock.
@@ -20,6 +20,32 @@ pub enum Clock {
 }
 
 impl Clock {
+    /// Attempts to map a `wp_presentation.clock_id` value to a [`Clock`].
+    ///
+    /// Returns `Some(Clock::Presentation(...))` if the raw id maps to a POSIX
+    /// clock recognized by the platform. Returns `None` for unknown or
+    /// out-of-range values, in which case the caller should keep the current
+    /// clock and degrade gracefully.
+    #[must_use]
+    pub fn from_presentation_clock_id(clk_id: u32) -> Option<Self> {
+        // `PosixClockId` is `u32` on Apple platforms, `i32` elsewhere
+        #[cfg(not(target_vendor = "apple"))]
+        let posix_id = {
+            let raw = i32::try_from(clk_id).ok()?;
+            PosixClockId::try_from(raw).ok()?
+        };
+        #[cfg(target_vendor = "apple")]
+        let posix_id = PosixClockId::try_from(clk_id).ok()?;
+        Some(Self::Presentation(posix_id))
+    }
+
+    /// Returns the current host time read from this clock in nanoseconds.
+    #[must_use]
+    pub fn now(self) -> HostTime {
+        let timespec = clock_gettime(self.posix_clock_id());
+        timespec_to_host_time(timespec)
+    }
+
     #[must_use]
     const fn posix_clock_id(self) -> PosixClockId {
         match self {
@@ -29,39 +55,19 @@ impl Clock {
     }
 }
 
-/// Returns the Wayland backend [`Timebase`]: host ticks are nanoseconds.
+/// Returns the Wayland [`Timebase`]: host ticks are nanoseconds.
 #[must_use]
 pub const fn timebase() -> Timebase {
     Timebase::NANOS
 }
 
 /// Returns the current monotonic host time in nanoseconds.
+///
+/// Hosts tracking a `wp_presentation` clock domain should prefer
+/// [`Clock::now`] on the selected clock so all timing facts stay comparable.
 #[must_use]
 pub fn now() -> HostTime {
-    now_for_clock(Clock::Monotonic)
-}
-
-/// Attempts to map a `wp_presentation.clock_id` value to a [`Clock`].
-///
-/// Returns `Some(Clock::Presentation(...))` if the raw id maps to a POSIX
-/// clock recognized by the platform. Returns `None` for unknown or
-/// out-of-range values, in which case the caller should keep the current
-/// clock and degrade gracefully.
-pub(crate) fn clock_from_presentation_clk_id(clk_id: u32) -> Option<Clock> {
-    // `PosixClockId` is `u32` on Apple platforms, `i32` elsewhere
-    #[cfg(not(target_vendor = "apple"))]
-    let posix_id = {
-        let raw = i32::try_from(clk_id).ok()?;
-        PosixClockId::try_from(raw).ok()?
-    };
-    #[cfg(target_vendor = "apple")]
-    let posix_id = PosixClockId::try_from(clk_id).ok()?;
-    Some(Clock::Presentation(posix_id))
-}
-
-pub(crate) fn now_for_clock(clock: Clock) -> HostTime {
-    let timespec = clock_gettime(clock.posix_clock_id());
-    timespec_to_host_time(timespec)
+    Clock::Monotonic.now()
 }
 
 fn timespec_to_host_time(timespec: Timespec) -> HostTime {
@@ -79,9 +85,7 @@ fn timespec_to_host_time(timespec: Timespec) -> HostTime {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Clock, clock_from_presentation_clk_id, now, now_for_clock, timebase, timespec_to_host_time,
-    };
+    use super::{Clock, now, timebase, timespec_to_host_time};
     use frameclock::HostTime;
     use frameclock::time::Timebase;
     use rustix::time::{ClockId as PosixClockId, Timespec};
@@ -100,7 +104,7 @@ mod tests {
 
     #[test]
     fn presentation_clock_variant_is_usable() {
-        let tick = now_for_clock(Clock::Presentation(PosixClockId::Monotonic));
+        let tick = Clock::Presentation(PosixClockId::Monotonic).now();
         assert!(
             tick.ticks() > 0,
             "clock_gettime(monotonic) should be positive"
@@ -129,30 +133,30 @@ mod tests {
     #[test]
     fn clock_from_known_monotonic_id() {
         let clk_id = PosixClockId::Monotonic as u32;
-        let clock = clock_from_presentation_clk_id(clk_id).unwrap();
+        let clock = Clock::from_presentation_clock_id(clk_id).unwrap();
         assert_eq!(clock, Clock::Presentation(PosixClockId::Monotonic));
         // The returned clock must be readable.
-        assert!(now_for_clock(clock).ticks() > 0);
+        assert!(clock.now().ticks() > 0);
     }
 
     #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn clock_from_known_monotonic_raw_id() {
         let clk_id = PosixClockId::MonotonicRaw as u32;
-        let clock = clock_from_presentation_clk_id(clk_id).unwrap();
+        let clock = Clock::from_presentation_clock_id(clk_id).unwrap();
         assert_eq!(clock, Clock::Presentation(PosixClockId::MonotonicRaw));
-        assert!(now_for_clock(clock).ticks() > 0);
+        assert!(clock.now().ticks() > 0);
     }
 
     #[test]
     fn clock_from_unknown_in_range_id() {
         // A value that fits in i32 but is not a recognized POSIX clock.
-        assert!(clock_from_presentation_clk_id(12345).is_none());
+        assert!(Clock::from_presentation_clock_id(12345).is_none());
     }
 
     #[test]
     fn clock_from_overflow_id() {
         // u32::MAX overflows i32, should be rejected.
-        assert!(clock_from_presentation_clk_id(u32::MAX).is_none());
+        assert!(Clock::from_presentation_clock_id(u32::MAX).is_none());
     }
 }

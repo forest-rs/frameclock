@@ -1,4 +1,4 @@
-// Copyright 2026 the Subduction Authors
+// Copyright 2026 the Frameclock Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Presentation feedback contracts and queueing.
@@ -10,21 +10,12 @@ use frameclock::{HostTime, OutputId};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SubmissionId(pub u64);
 
-/// Per-feedback-object accumulation state while the feedback is in flight.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct PendingFeedback {
-    pub(crate) sync_output: Option<OutputId>,
-}
-
 /// Converts a `wp_presentation_feedback.presented` timestamp to [`HostTime`].
 ///
 /// `tv_nsec` is clamped to `≤999_999_999` to prevent overflow. Arithmetic is
 /// saturating so edge-case compositor data never causes a panic.
-pub(crate) fn presentation_time_to_host_time(
-    tv_sec_hi: u32,
-    tv_sec_lo: u32,
-    tv_nsec: u32,
-) -> HostTime {
+#[must_use]
+pub fn presentation_time_to_host_time(tv_sec_hi: u32, tv_sec_lo: u32, tv_nsec: u32) -> HostTime {
     let seconds = u64::from(tv_sec_hi) << 32 | u64::from(tv_sec_lo);
     let nanos = seconds
         .saturating_mul(1_000_000_000)
@@ -39,7 +30,7 @@ pub enum PresentEvent {
     Presented {
         /// Identity of the commit this event corresponds to.
         id: SubmissionId,
-        /// Actual presentation timestamp in backend `HostTime` ticks.
+        /// Actual presentation timestamp in host-time ticks.
         actual_present: HostTime,
         /// Observed refresh interval in host ticks, if known.
         refresh_interval: Option<u64>,
