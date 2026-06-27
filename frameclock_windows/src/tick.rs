@@ -1,196 +1,25 @@
-// Copyright 2026 the Subduction Authors
+// Copyright 2026 the Frameclock Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! `VSync`-paced tick sources that drive frames via `PostMessageW`.
-//!
-//! The tick thread calls `DwmFlush()` (or waits on a frame latency
-//! waitable) to pace itself to the DWM compositor `VSync`, then posts
-//! [`WM_APP_TICK`] to the window's message queue. Because the message
-//! is *posted* (not sent), Windows' internal modal loops for move and
-//! resize dispatch it — animations continue uninterrupted during window
-//! drag.
+//! `FrameTick` construction from QPC reads.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use frameclock::{FrameTick, HostTime, OutputId};
 
-use frameclock::timing::PresentationTiming;
-use frameclock::{FrameTick, HostTime, OutputId, PresentHints};
-
-use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WAIT_OBJECT_0, WPARAM};
-use windows::Win32::Graphics::Dwm::DwmFlush;
-use windows::Win32::System::Threading::WaitForSingleObject;
-use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
-
-/// Custom window message posted by the tick thread on each `VSync`.
-///
-/// Handle this in your `wnd_proc` to drive one frame per `VSync`.
-/// Call [`make_tick`] inside the handler to construct the [`FrameTick`].
-pub const WM_APP_TICK: u32 = WM_APP + 1;
-
-/// Tick source paced by `DwmFlush()`.
-///
-/// Spawns a thread that blocks on `DwmFlush()` and posts [`WM_APP_TICK`]
-/// to the provided HWND. Dropping this struct stops the thread.
-pub struct TickSource {
-    running: Arc<AtomicBool>,
-    handle: Option<std::thread::JoinHandle<()>>,
-}
-
-impl std::fmt::Debug for TickSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TickSource")
-            .field("running", &self.running.load(Ordering::Relaxed))
-            .finish_non_exhaustive()
-    }
-}
-
-impl TickSource {
-    /// Start the tick source thread for `hwnd`.
-    pub fn start(hwnd: HWND) -> Self {
-        let running = Arc::new(AtomicBool::new(true));
-        let running_clone = running.clone();
-
-        // Cast the pointer to usize so it is `Send + Copy` across the
-        // thread boundary. `PostMessageW` is safe from non-GUI threads.
-        let hwnd_bits = hwnd.0 as usize;
-
-        let handle = std::thread::Builder::new()
-            .name("SubductionTick".into())
-            .spawn(move || {
-                let hwnd = HWND(hwnd_bits as *mut core::ffi::c_void);
-                Self::thread_main(hwnd, &running_clone);
-            })
-            .expect("failed to spawn tick source thread");
-
-        Self {
-            running,
-            handle: Some(handle),
-        }
-    }
-
-    fn thread_main(hwnd: HWND, running: &AtomicBool) {
-        while running.load(Ordering::Relaxed) {
-            if unsafe { DwmFlush() }.is_err() {
-                std::thread::sleep(Duration::from_millis(16));
-            }
-            unsafe {
-                // Failure means the hwnd is gone or the queue is full — either
-                // way the tick is harmlessly skipped; the next VSync retries.
-                let _ = PostMessageW(Some(hwnd), WM_APP_TICK, WPARAM(0), LPARAM(0));
-            }
-        }
-    }
-
-    /// Stop the tick source and join the thread.
-    pub fn stop(&mut self) {
-        self.running.store(false, Ordering::Relaxed);
-        if let Some(h) = self.handle.take() {
-            // Thread panic during shutdown — nothing to recover; propagating
-            // from Drop would abort.
-            let _ = h.join();
-        }
-    }
-}
-
-impl Drop for TickSource {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
-
-/// Tick source paced by a swapchain frame latency waitable.
-///
-/// Uses `GetFrameLatencyWaitableObject` (from the application's
-/// swapchain) instead of `DwmFlush()`. This provides per-swapchain
-/// pacing rather than global DWM sync, enabling tighter frame timing.
-///
-/// Falls back to `DwmFlush()` if the waitable times out (e.g. swapchain
-/// stalled or destroyed).
-pub struct FrameEventTickSource {
-    running: Arc<AtomicBool>,
-    handle: Option<std::thread::JoinHandle<()>>,
-}
-
-impl std::fmt::Debug for FrameEventTickSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FrameEventTickSource")
-            .field("running", &self.running.load(Ordering::Relaxed))
-            .finish_non_exhaustive()
-    }
-}
-
-impl FrameEventTickSource {
-    /// Start the tick source thread for `hwnd`, paced by `frame_event`
-    /// (`IDXGISwapChain2::GetFrameLatencyWaitableObject`).
-    pub fn start(hwnd: HWND, frame_event: HANDLE) -> Self {
-        let running = Arc::new(AtomicBool::new(true));
-        let running_clone = running.clone();
-
-        let hwnd_bits = hwnd.0 as usize;
-        let event_bits = frame_event.0 as usize;
-
-        let handle = std::thread::Builder::new()
-            .name("SubductionTick".into())
-            .spawn(move || {
-                let hwnd = HWND(hwnd_bits as *mut core::ffi::c_void);
-                let event = HANDLE(event_bits as *mut core::ffi::c_void);
-                Self::thread_main(hwnd, event, &running_clone);
-            })
-            .expect("failed to spawn tick source thread");
-
-        Self {
-            running,
-            handle: Some(handle),
-        }
-    }
-
-    fn thread_main(hwnd: HWND, frame_event: HANDLE, running: &AtomicBool) {
-        while running.load(Ordering::Relaxed) {
-            let result = unsafe { WaitForSingleObject(frame_event, 32) };
-            if result != WAIT_OBJECT_0 && unsafe { DwmFlush() }.is_err() {
-                std::thread::sleep(Duration::from_millis(16));
-            }
-            unsafe {
-                // Failure means the hwnd is gone or the queue is full — either
-                // way the tick is harmlessly skipped; the next VSync retries.
-                let _ = PostMessageW(Some(hwnd), WM_APP_TICK, WPARAM(0), LPARAM(0));
-            }
-        }
-    }
-
-    /// Stop the tick source and join the thread.
-    pub fn stop(&mut self) {
-        self.running.store(false, Ordering::Relaxed);
-        if let Some(h) = self.handle.take() {
-            // Thread panic during shutdown — nothing to recover; propagating
-            // from Drop would abort.
-            let _ = h.join();
-        }
-    }
-}
-
-impl Drop for FrameEventTickSource {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
-
-/// Build a [`FrameTick`] from QPC. Call inside the `WM_APP_TICK` handler.
+/// Build a [`FrameTick`] from QPC. Call inside a `VSync`-paced tick handler.
 #[must_use]
 pub fn make_tick(
     refresh_interval_ns: u64,
     frame_index: u64,
     prev_present_time: Option<HostTime>,
 ) -> FrameTick {
-    let timebase = crate::timing::timebase();
+    let timebase = crate::time::timebase();
     let interval_ticks = if refresh_interval_ns > 0 {
         refresh_interval_ns * u64::from(timebase.denom) / u64::from(timebase.numer)
     } else {
         0
     };
 
-    let now = crate::timing::now();
+    let now = crate::time::now();
 
     let predicted_present = if interval_ticks > 0 {
         if let Some(prev) = prev_present_time {
@@ -216,19 +45,34 @@ pub fn make_tick(
     }
 }
 
-/// Compute presentation hints from a tick and safety margin (nanoseconds).
-#[must_use]
-pub fn compute_hints(tick: &FrameTick, safety_margin_ns: u64) -> PresentHints {
-    let timebase = crate::timing::timebase();
-    let margin_ticks = safety_margin_ns * u64::from(timebase.denom) / u64::from(timebase.numer);
+#[cfg(test)]
+mod tests {
+    use super::make_tick;
+    use frameclock::HostTime;
 
-    PresentHints::new(
-        PresentationTiming::Estimated,
-        tick.predicted_present,
-        HostTime(
-            tick.predicted_present
-                .map(|p| p.ticks().saturating_sub(margin_ticks))
-                .unwrap_or(tick.now.ticks()),
-        ),
-    )
+    #[test]
+    fn make_tick_with_refresh_and_prev() {
+        let prev = HostTime(1_000_000);
+        let tick = make_tick(16_666_667, 5, Some(prev));
+        assert_eq!(tick.frame_index, 5);
+        assert_eq!(tick.prev_actual_present, Some(prev));
+        assert!(tick.predicted_present.is_some());
+        assert!(tick.refresh_interval.is_some());
+    }
+
+    #[test]
+    fn make_tick_zero_refresh() {
+        let tick = make_tick(0, 1, None);
+        assert_eq!(tick.predicted_present, None);
+        assert_eq!(tick.refresh_interval, None);
+        assert_eq!(tick.prev_actual_present, None);
+    }
+
+    #[test]
+    fn make_tick_first_frame_predicts_from_now() {
+        let tick = make_tick(16_666_667, 0, None);
+        // First frame with no prev: predicted_present = now + interval
+        let predicted = tick.predicted_present.unwrap();
+        assert!(predicted.ticks() > tick.now.ticks());
+    }
 }
