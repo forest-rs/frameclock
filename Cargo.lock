@@ -430,6 +430,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "frameclock_x11"
+version = "0.0.1"
+dependencies = [
+ "frameclock",
+ "rustix 1.1.4",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"

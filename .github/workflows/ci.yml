@@ -18,9 +18,11 @@ env:
     -p frameclock_wayland
     -p frameclock_web
     -p frameclock_windows
+    -p frameclock_x11
     -p mediaclock
   # List of packages that don't support `no_std`.
   RUST_STD_ONLY_PKGS: >-
+    --exclude frameclock_x11
     --exclude frameclock_apple
     --exclude frameclock_simulated
     --exclude frameclock_wayland
@@ -28,6 +30,7 @@ env:
     --exclude winit_paced_redraw
   # List of packages that don't support wasip1.
   RUST_NO_WASIP1_PKGS: >-
+    --exclude frameclock_x11
     --exclude frameclock_web
     --exclude frameclock_apple
     --exclude frameclock_wayland
@@ -35,6 +38,7 @@ env:
     --exclude winit_paced_redraw
   # List of packages that don't support wasm32.
   RUST_NO_WASM_PKGS: >-
+    --exclude frameclock_x11
     --exclude frameclock_apple
     --exclude frameclock_wayland
     --exclude frameclock_windows
@@ -46,6 +50,7 @@ env:
     --exclude frameclock_windows
   # Packages excluded on non-Linux runners (Linux-only).
   RUST_LINUX_EXCLUDE_PKGS: >-
+    --exclude frameclock_x11
     --exclude frameclock_wayland
   # List of features that depend on the standard library and will be excluded from no_std checks.
   FEATURES_DEPENDING_ON_STD: "std,default"

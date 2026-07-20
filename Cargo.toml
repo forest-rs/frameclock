@@ -7,6 +7,7 @@ members = [
   "frameclock_web",
   "frameclock_wayland",
   "frameclock_windows",
+  "frameclock_x11",
   "frameclock_footfall",
   "examples/frameclock_simulated",
   "examples/winit_paced_redraw",
@@ -35,6 +36,7 @@ mediaclock = { version = "0.0.1", path = "mediaclock" }
 frameclock_apple = { version = "0.0.1", path = "frameclock_apple", default-features = false }
 frameclock_wayland = { version = "0.0.1", path = "frameclock_wayland" }
 frameclock_windows = { version = "0.0.1", path = "frameclock_windows" }
+frameclock_x11 = { version = "0.0.1", path = "frameclock_x11" }
 frameclock_web = { version = "0.0.1", path = "frameclock_web" }
 wasm-bindgen = { version = "0.2", default-features = false }
 web-time = { version = "1.1.0" }

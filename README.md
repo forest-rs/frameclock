@@ -9,6 +9,7 @@ Display-frame scheduling and media timeline mapping for Rust applications.
 | [`frameclock_apple`](frameclock_apple/) | Apple display-link timing |
 | [`frameclock_wayland`](frameclock_wayland/) | Wayland clock and presentation timing |
 | [`frameclock_windows`](frameclock_windows/) | Windows performance-counter timing |
+| [`frameclock_x11`](frameclock_x11/) | X11 Present timing |
 | [`frameclock_web`](frameclock_web/) | Browser animation-frame timing |
 | [`frameclock_footfall`](frameclock_footfall/) | Frame timing observations for Footfall |
 
@@ -27,12 +28,12 @@ cargo fmt --all --check
 taplo fmt --check --diff
 typos
 bash .github/copyright.sh
-cargo clippy --workspace --exclude frameclock_wayland --exclude frameclock_windows --all-targets --all-features -- -D warnings
-cargo test --workspace --exclude frameclock_wayland --exclude frameclock_windows --all-features
-cargo doc --workspace --exclude frameclock_wayland --exclude frameclock_windows --all-features --no-deps
+cargo clippy --workspace --exclude frameclock_wayland --exclude frameclock_windows --exclude frameclock_x11 --all-targets --all-features -- -D warnings
+cargo test --workspace --exclude frameclock_wayland --exclude frameclock_windows --exclude frameclock_x11 --all-features
+cargo doc --workspace --exclude frameclock_wayland --exclude frameclock_windows --exclude frameclock_x11 --all-features --no-deps
 ```
 
 On Linux, exclude `frameclock_apple` and `frameclock_windows`; on Windows, exclude
-`frameclock_apple` and `frameclock_wayland`.
+`frameclock_apple`, `frameclock_wayland`, and `frameclock_x11`.
 
 Licensed under Apache-2.0 OR MIT.
