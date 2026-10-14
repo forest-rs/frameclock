@@ -19,44 +19,12 @@ env:
     -p frameclock_web
     -p frameclock_windows
     -p mediaclock
-    -p subduction_backend_android
-    -p subduction_backend_apple
-    -p subduction_backend_wayland
-    -p subduction_backend_web
-    -p subduction_backend_windows
-    -p subduction_backend_x11
-    -p subduction_core
-    -p subduction_render
-    -p subduction_sync_harness
   # List of packages that don't support `no_std`.
   RUST_STD_ONLY_PKGS: >-
     --exclude frameclock_apple
     --exclude frameclock_simulated
     --exclude frameclock_wayland
     --exclude frameclock_windows
-    --exclude macos_layers
-    --exclude macos_lotta_layers
-    --exclude macos_wgpu
-    --exclude subduction_backend_android
-    --exclude subduction_backend_apple
-    --exclude subduction_backend_wayland
-    --exclude subduction_backend_web
-    --exclude subduction_backend_wgpu
-    --exclude subduction_backend_windows
-    --exclude subduction_backend_x11
-    --exclude subduction_debug
-    --exclude trace_demo
-    --exclude wayland_example_common
-    --exclude wayland_layers
-    --exclude wayland_lotta_layers
-    --exclude web_layers
-    --exclude web_lotta_layers
-    --exclude wayland_wgpu
-    --exclude web_video
-    --exclude wgpu_layers
-    --exclude wgpu_lotta_layers
-    --exclude windows_layers
-    --exclude windows_lotta_layers
     --exclude winit_paced_redraw
   # List of packages that don't support wasip1.
   RUST_NO_WASIP1_PKGS: >-
@@ -64,79 +32,21 @@ env:
     --exclude frameclock_apple
     --exclude frameclock_wayland
     --exclude frameclock_windows
-    --exclude macos_layers
-    --exclude macos_lotta_layers
-    --exclude macos_wgpu
-    --exclude subduction_backend_apple
-    --exclude subduction_backend_wayland
-    --exclude subduction_backend_web
-    --exclude subduction_backend_wgpu
-    --exclude subduction_backend_windows
-    --exclude wayland_example_common
-    --exclude wayland_layers
-    --exclude wayland_lotta_layers
-    --exclude wayland_wgpu
-    --exclude web_layers
-    --exclude web_lotta_layers
-    --exclude web_video
-    --exclude wgpu_layers
-    --exclude wgpu_lotta_layers
-    --exclude windows_layers
-    --exclude windows_lotta_layers
     --exclude winit_paced_redraw
   # List of packages that don't support wasm32.
   RUST_NO_WASM_PKGS: >-
     --exclude frameclock_apple
     --exclude frameclock_wayland
     --exclude frameclock_windows
-    --exclude macos_layers
-    --exclude macos_lotta_layers
-    --exclude macos_wgpu
-    --exclude subduction_backend_apple
-    --exclude subduction_backend_windows
-    --exclude subduction_backend_wayland
-    --exclude trace_demo
-    --exclude wayland_example_common
-    --exclude wayland_layers
-    --exclude wayland_lotta_layers
-    --exclude wayland_wgpu
-    --exclude windows_layers
-    --exclude windows_lotta_layers
   # Packages excluded on non-macOS runners (macOS-only).
   RUST_MAC_EXCLUDE_PKGS: >-
     --exclude frameclock_apple
-    --exclude macos_layers
-    --exclude macos_lotta_layers
-    --exclude macos_wgpu
-    --exclude subduction_backend_apple
   # Packages excluded on non-Windows runners (Windows-only).
   RUST_WIN_EXCLUDE_PKGS: >-
     --exclude frameclock_windows
-    --exclude subduction_backend_windows
-    --exclude windows_layers
-    --exclude windows_lotta_layers
   # Packages excluded on non-Linux runners (Linux-only).
   RUST_LINUX_EXCLUDE_PKGS: >-
     --exclude frameclock_wayland
-    --exclude subduction_backend_wayland
-    --exclude wayland_example_common
-    --exclude wayland_layers
-    --exclude wayland_lotta_layers
-    --exclude wayland_wgpu
-  # macOS examples validated in dedicated jobs (supported feature sets only).
-  RUST_MAC_EXAMPLE_PKGS: >-
-    -p macos_layers
-    -p macos_lotta_layers
-    -p macos_wgpu
-  # macOS examples that support explicit display-link selection.
-  RUST_MAC_DISPLAY_LINK_EXAMPLE_PKGS: >-
-    -p macos_layers
-    -p macos_lotta_layers
-  # Exclude macOS examples from generic feature-matrix sweeps.
-  RUST_MAC_EXAMPLE_MATRIX_EXCLUDE_PKGS: >-
-    --exclude macos_layers
-    --exclude macos_lotta_layers
-    --exclude macos_wgpu
   # List of features that depend on the standard library and will be excluded from no_std checks.
   FEATURES_DEPENDING_ON_STD: "std,default"
 
@@ -246,11 +156,11 @@ jobs:
 
       - name: cargo clippy (no_std) (non-macOS)
         if: runner.os != 'macOS'
-        run: cargo hack clippy ${{ env.RUST_MAC_EXCLUDE_PKGS }} ${{ env.RUST_STD_ONLY_PKGS }} --workspace --locked --optional-deps --each-feature --ignore-unknown-features --features libm --exclude-features ${{ env.FEATURES_DEPENDING_ON_STD }} --target x86_64-unknown-none -- -D warnings
+        run: cargo hack clippy ${{ env.RUST_STD_ONLY_PKGS }} --workspace --locked --optional-deps --each-feature --exclude-features ${{ env.FEATURES_DEPENDING_ON_STD }} --target x86_64-unknown-none -- -D warnings
 
       - name: cargo clippy (no_std) (macOS)
         if: runner.os == 'macOS'
-        run: cargo hack clippy ${{ env.RUST_STD_ONLY_PKGS }} --workspace --locked --optional-deps --each-feature --ignore-unknown-features --features libm --exclude-features ${{ env.FEATURES_DEPENDING_ON_STD }} --target x86_64-unknown-none -- -D warnings
+        run: cargo hack clippy ${{ env.RUST_STD_ONLY_PKGS }} --workspace --locked --optional-deps --each-feature --exclude-features ${{ env.FEATURES_DEPENDING_ON_STD }} --target x86_64-unknown-none -- -D warnings
 
       - name: cargo clippy (Linux)
         if: runner.os == 'Linux'
@@ -262,23 +172,15 @@ jobs:
 
       - name: cargo clippy (macOS)
         if: runner.os == 'macOS'
-        run: cargo hack clippy ${{ env.RUST_MAC_EXAMPLE_MATRIX_EXCLUDE_PKGS }} ${{ env.RUST_LINUX_EXCLUDE_PKGS }} ${{ env.RUST_WIN_EXCLUDE_PKGS }} --workspace --locked --optional-deps --each-feature --ignore-unknown-features --features std -- -D warnings
+        run: cargo hack clippy ${{ env.RUST_LINUX_EXCLUDE_PKGS }} ${{ env.RUST_WIN_EXCLUDE_PKGS }} --workspace --locked --optional-deps --each-feature --ignore-unknown-features --features std -- -D warnings
 
       - name: cargo clippy (auxiliary) (non-macOS)
         if: runner.os != 'macOS'
-        run: cargo hack clippy ${{ env.RUST_MAC_EXCLUDE_PKGS }} ${{ env.RUST_STD_ONLY_PKGS }} --workspace --locked --optional-deps --each-feature --ignore-unknown-features --features std --tests --benches --examples -- -D warnings
+        run: cargo hack clippy ${{ env.RUST_STD_ONLY_PKGS }} --workspace --locked --optional-deps --each-feature --ignore-unknown-features --features std --tests --benches --examples -- -D warnings
 
       - name: cargo clippy (auxiliary) (macOS)
         if: runner.os == 'macOS'
         run: cargo hack clippy ${{ env.RUST_STD_ONLY_PKGS }} --workspace --locked --optional-deps --each-feature --ignore-unknown-features --features std --tests --benches --examples -- -D warnings
-
-      - name: cargo clippy (macOS examples, default)
-        if: runner.os == 'macOS'
-        run: cargo clippy ${{ env.RUST_MAC_EXAMPLE_PKGS }} --locked -- -D warnings
-
-      - name: cargo clippy (macOS examples, cv-display-link)
-        if: runner.os == 'macOS'
-        run: cargo clippy ${{ env.RUST_MAC_DISPLAY_LINK_EXAMPLE_PKGS }} --locked --no-default-features --features cv-display-link -- -D warnings
 
   clippy-stable-wasm:
     name: cargo clippy (wasm32)
@@ -412,11 +314,11 @@ jobs:
 
       - name: cargo check (no_std) (non-macOS)
         if: runner.os != 'macOS'
-        run: cargo hack check ${{ env.RUST_MIN_VER_PKGS }} ${{ env.RUST_MAC_EXCLUDE_PKGS }} ${{ env.RUST_STD_ONLY_PKGS }} --locked --optional-deps --each-feature --ignore-unknown-features --features libm --exclude-features ${{ env.FEATURES_DEPENDING_ON_STD }} --target x86_64-unknown-none
+        run: cargo hack check ${{ env.RUST_MIN_VER_PKGS }} ${{ env.RUST_STD_ONLY_PKGS }} --locked --optional-deps --each-feature --exclude-features ${{ env.FEATURES_DEPENDING_ON_STD }} --target x86_64-unknown-none
 
       - name: cargo check (no_std) (macOS)
         if: runner.os == 'macOS'
-        run: cargo hack check ${{ env.RUST_MIN_VER_PKGS }} ${{ env.RUST_STD_ONLY_PKGS }} --locked --optional-deps --each-feature --ignore-unknown-features --features libm --exclude-features ${{ env.FEATURES_DEPENDING_ON_STD }} --target x86_64-unknown-none
+        run: cargo hack check ${{ env.RUST_MIN_VER_PKGS }} ${{ env.RUST_STD_ONLY_PKGS }} --locked --optional-deps --each-feature --exclude-features ${{ env.FEATURES_DEPENDING_ON_STD }} --target x86_64-unknown-none
 
       - name: cargo check (Linux)
         if: runner.os == 'Linux'
@@ -457,9 +359,10 @@ jobs:
 
   doc:
     name: cargo doc
-    # NOTE: We don't have any platform specific docs in this workspace, so we only run on Ubuntu.
-    #       If we get per-platform docs (win/macos/linux/wasm32/..) then doc jobs should match that.
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -472,10 +375,24 @@ jobs:
           save-if: ${{ github.event_name != 'merge_group' }}
 
       # We test documentation using nightly to match docs.rs.
-      - name: cargo doc
+      - name: cargo doc (Linux)
+        if: runner.os == 'Linux'
         run: cargo doc ${{ env.RUST_MAC_EXCLUDE_PKGS }} ${{ env.RUST_WIN_EXCLUDE_PKGS }} --workspace --locked --all-features --no-deps --document-private-items
         env:
           RUSTDOCFLAGS: '--cfg docsrs -D warnings'
+
+      - name: cargo doc (Windows)
+        if: runner.os == 'Windows'
+        run: cargo doc ${{ env.RUST_MAC_EXCLUDE_PKGS }} ${{ env.RUST_LINUX_EXCLUDE_PKGS }} --workspace --locked --all-features --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: '--cfg docsrs -D warnings'
+
+      - name: cargo doc (macOS)
+        if: runner.os == 'macOS'
+        run: cargo doc ${{ env.RUST_LINUX_EXCLUDE_PKGS }} ${{ env.RUST_WIN_EXCLUDE_PKGS }} --workspace --locked --all-features --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: '--cfg docsrs -D warnings'
+
 
   # If this fails, consider changing your text or adding something to .typos.toml.
   typos:

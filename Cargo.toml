@@ -3,58 +3,21 @@ resolver = "2"
 members = [
   "frameclock",
   "mediaclock",
-  "frameclock_web",
   "frameclock_apple",
+  "frameclock_web",
   "frameclock_wayland",
   "frameclock_windows",
   "frameclock_footfall",
-  "subduction_backend_apple",
-  "subduction_backend_web",
-  "subduction_backend_wgpu",
-  "subduction_backend_windows",
-  "subduction_backend_android",
-  "subduction_backend_wayland",
-  "subduction_backend_x11",
-  "subduction_core",
-  "subduction_debug",
-  "subduction_render",
-  "subduction_sync_harness",
   "examples/frameclock_simulated",
-  "examples/lotta_layers_common",
-  "examples/macos_layers",
-  "examples/macos_lotta_layers",
-  "examples/macos_wgpu",
-  "examples/trace_demo",
-  "examples/web_layers",
-  "examples/web_video",
-  "examples/web_lotta_layers",
-  "examples/wayland_example_common",
-  "examples/wayland_layers",
-  "examples/wayland_lotta_layers",
-  "examples/wayland_wgpu",
-  "examples/wgpu_layers",
-  "examples/wgpu_lotta_layers",
-  "examples/windows_layers",
-  "examples/windows_lotta_layers",
   "examples/winit_paced_redraw",
 ]
 
-# Only cross-platform crates are built by default. Platform-specific backends
-# and their examples must be selected explicitly (e.g. `cargo check -p subduction_backend_wayland`).
+# Platform adapters are selected explicitly on their supported targets.
 default-members = [
   "frameclock",
-  "frameclock_footfall",
   "mediaclock",
-  "subduction_core",
-  "subduction_debug",
-  "subduction_render",
-  "subduction_sync_harness",
-  "subduction_backend_wgpu",
+  "frameclock_footfall",
   "examples/frameclock_simulated",
-  "examples/lotta_layers_common",
-  "examples/trace_demo",
-  "examples/wgpu_layers",
-  "examples/wgpu_lotta_layers",
   "examples/winit_paced_redraw",
 ]
 
@@ -64,7 +27,7 @@ edition = "2024"
 # Keep in sync with RUST_MIN_VER in .github/workflows/ci.yml and package README.md files.
 rust-version = "1.92"
 license = "Apache-2.0 OR MIT"
-repository = "https://github.com/forest-rs/subduction"
+repository = "https://github.com/forest-rs/frameclock"
 
 [workspace.dependencies]
 frameclock = { version = "0.0.1", path = "frameclock" }
@@ -73,15 +36,7 @@ frameclock_apple = { version = "0.0.1", path = "frameclock_apple", default-featu
 frameclock_wayland = { version = "0.0.1", path = "frameclock_wayland" }
 frameclock_windows = { version = "0.0.1", path = "frameclock_windows" }
 frameclock_web = { version = "0.0.1", path = "frameclock_web" }
-subduction_core = { path = "subduction_core" }
-subduction_sync_harness = { path = "subduction_sync_harness" }
-invalidation = "0.2.0"
-kurbo = { version = "0.13", default-features = false, features = ["libm"] }
-color = { version = "0.3.2", default-features = false, features = ["libm"] }
-wgpu = "29"
-bytemuck = { version = "1", features = ["derive"] }
 wasm-bindgen = { version = "0.2", default-features = false }
-web-sys = "0.3"
 web-time = { version = "1.1.0" }
 footfall_analysis = "0.1.0"
 footfall_core = "0.1.0"
