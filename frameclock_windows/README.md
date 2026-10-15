@@ -37,12 +37,14 @@ time `DwmFlush` returned, or `DXGI_FRAME_STATISTICS::SyncQPCTime`, will do.
 
 ```rust,ignore
 use frameclock::{
-    Duration, FrameBeginResult, FrameDemand, FrameDriver, FrameSubmission, OutputId,
+    DisplayTiming, Duration, FrameBeginResult, FrameDemand, FrameDriver, FrameSubmission,
+    OutputId,
 };
 
 let mut driver = FrameDriver::new(frameclock_windows::scheduler_config());
 // Every time and duration is in QPC ticks.
 let refresh = Duration::from_nanos(16_666_667, frameclock_windows::timebase());
+let display_timing = DisplayTiming::fixed(refresh);
 let output = OutputId(0);
 let mut last_present = None;
 
@@ -50,7 +52,7 @@ loop {
     driver.request(FrameDemand::ANIMATION);
 
     let tick = frameclock_windows::make_tick(output, Some(refresh), last_present);
-    let begin = driver.begin_frame(frameclock_windows::frame_opportunity(tick, refresh));
+    let begin = driver.begin_frame(frameclock_windows::frame_opportunity(tick, display_timing));
     match begin.result {
         FrameBeginResult::Ready(frame) => {
             // Render for frame.sample_time() and present the swapchain.
@@ -78,7 +80,22 @@ loop {
 
 Use `scheduler_config` for the `FrameDriver`: it is
 `SchedulerConfig::estimated` in QPC ticks, matching the estimated hints that
-`frame_opportunity` builds from `make_tick`'s grid predictions.
+`frame_opportunity` builds from `make_tick`'s grid predictions. Every duration
+is in QPC ticks too: a raw `Duration(16_666_667)` would mean about 1.7 s, and
+debug builds of the scheduler panic on display timing that slow. When the host
+knows nothing about the output, `default_display_timing` is a fixed 60 Hz in
+QPC ticks.
+
+## Variable Refresh
+
+The `DisplayTiming` passed to `frame_opportunity` describes the output the
+tick was made for; rebuild it when the window moves to another display or the
+display mode changes. On a G-Sync, FreeSync or Windows dynamic-refresh output,
+pass `DisplayTiming::variable` with the output's range. DXGI does not report
+the range, so read it from the monitor's EDID (for example through
+`DisplayMonitor::GetDescriptor`) or from host configuration. Variable timing
+is kept as is, since on such an output the tick's refresh interval is only
+the last observed gap; fixed timing is refined from the tick.
 
 ## Submitting Frames
 
