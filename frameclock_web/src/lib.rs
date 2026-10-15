@@ -21,6 +21,7 @@ mod raf;
 pub use raf::RafLoop;
 
 use frameclock::time::Timebase;
+use frameclock::timing::{PresentationTiming, default_commit_lead};
 use frameclock::{DisplayTiming, Duration, FrameOpportunity, FrameTick, HostTime, PresentHints};
 
 /// Browser host-time conversion: 1 tick = 1 microsecond = 1000 nanoseconds.
@@ -56,23 +57,43 @@ pub const fn timebase() -> Timebase {
     TIMEBASE
 }
 
+/// Computes pacing-only [`PresentHints`] from a browser [`FrameTick`] using
+/// [`default_commit_lead`].
+///
+/// Use [`present_hints_with_commit_lead`] when a host has a better estimate of
+/// how long the browser needs after the callback.
+#[must_use]
+pub fn present_hints(tick: &FrameTick, fallback_refresh_interval: Duration) -> PresentHints {
+    present_hints_with_commit_lead(
+        tick,
+        fallback_refresh_interval,
+        default_commit_lead(tick.refresh_interval_or(fallback_refresh_interval)),
+    )
+}
+
 /// Computes pacing-only [`PresentHints`] from a browser [`FrameTick`].
 ///
 /// Browsers do not expose a portable predicted present time or commit deadline
 /// through `requestAnimationFrame`, so `desired_present` is `None` and
-/// `latest_commit` is one refresh interval after the tick's `now`. A missing
-/// or zero refresh interval on the tick uses `fallback_refresh_interval`.
+/// `latest_commit` is `commit_lead` before one refresh interval after the
+/// tick's `now`. A missing or zero refresh interval on the tick uses
+/// `fallback_refresh_interval`.
+///
+/// A browser shows only what is drawn during the callback, so the hints
+/// [start each frame at the tick](PresentHints::starting_at_tick).
 #[must_use]
-pub fn present_hints(tick: &FrameTick, fallback_refresh_interval: Duration) -> PresentHints {
-    let refresh_interval = tick
-        .refresh_interval
-        .filter(|interval| !interval.is_zero())
-        .unwrap_or(fallback_refresh_interval);
-    PresentHints::pacing_only(
-        tick.now
-            .checked_add(refresh_interval)
-            .unwrap_or(HostTime(u64::MAX)),
+pub fn present_hints_with_commit_lead(
+    tick: &FrameTick,
+    fallback_refresh_interval: Duration,
+    commit_lead: Duration,
+) -> PresentHints {
+    PresentHints::for_tick(
+        tick,
+        PresentationTiming::PacingOnly,
+        fallback_refresh_interval,
+        commit_lead,
     )
+    .starting_at_tick()
 }
 
 /// Returns display timing for a browser RAF tick.
@@ -90,10 +111,25 @@ pub fn display_timing(tick: &FrameTick, fallback_interval: Duration) -> DisplayT
 ///
 /// Browser RAF exposes no portable predicted present time or commit deadline,
 /// so the opportunity is pacing-only and uses `fallback_interval` for both
-/// display timing and the commit boundary.
+/// display timing and the commit boundary, with [`default_commit_lead`].
 #[must_use]
 pub fn frame_opportunity(tick: FrameTick, fallback_interval: Duration) -> FrameOpportunity {
-    let hints = present_hints(&tick, fallback_interval);
+    let refresh_interval = tick.refresh_interval_or(fallback_interval);
+    frame_opportunity_with_commit_lead(
+        tick,
+        fallback_interval,
+        default_commit_lead(refresh_interval),
+    )
+}
+
+/// Builds a [`FrameOpportunity`] with an explicit commit lead.
+#[must_use]
+pub fn frame_opportunity_with_commit_lead(
+    tick: FrameTick,
+    fallback_interval: Duration,
+    commit_lead: Duration,
+) -> FrameOpportunity {
+    let hints = present_hints_with_commit_lead(&tick, fallback_interval, commit_lead);
     let display_timing = display_timing(&tick, fallback_interval);
     FrameOpportunity::new(tick, hints, display_timing)
 }
@@ -121,15 +157,22 @@ mod tests {
     }
 
     #[test]
-    fn present_hints_are_pacing_only() {
+    fn present_hints_are_pacing_only_and_start_at_the_tick() {
         let tick = test_tick();
         let hints = present_hints(&tick, DEFAULT_REFRESH_INTERVAL);
 
         assert_eq!(hints.desired_present(), None);
-        assert_eq!(
-            hints.latest_commit(),
-            HostTime(16_000 + DEFAULT_REFRESH_INTERVAL.ticks())
-        );
+        assert!(hints.starts_at_tick());
+        // A quarter refresh before the next one: 16_667 - 4_166 us.
+        assert_eq!(hints.latest_commit(), HostTime(16_000 + 12_501));
+    }
+
+    #[test]
+    fn present_hints_respect_explicit_commit_lead() {
+        let hints =
+            present_hints_with_commit_lead(&test_tick(), DEFAULT_REFRESH_INTERVAL, Duration(2_000));
+
+        assert_eq!(hints.latest_commit(), HostTime(16_000 + 14_667));
     }
 
     #[test]
@@ -138,11 +181,9 @@ mod tests {
             refresh_interval: Some(Duration::ZERO),
             ..test_tick()
         };
-        let hints = present_hints(&tick, DEFAULT_REFRESH_INTERVAL);
-
         assert_eq!(
-            hints.latest_commit(),
-            HostTime(16_000 + DEFAULT_REFRESH_INTERVAL.ticks())
+            present_hints(&tick, DEFAULT_REFRESH_INTERVAL),
+            present_hints(&test_tick(), DEFAULT_REFRESH_INTERVAL)
         );
     }
 
@@ -163,19 +204,20 @@ mod tests {
     }
 
     #[test]
-    fn driver_returns_ready_frame_for_due_demand() {
-        let tick = test_tick();
-        let mut config = SchedulerConfig::pacing_only(TIMEBASE);
-        config.initial_depth = 1;
-        config.minimum_frame_start_margin = Duration::ZERO;
-        let mut driver = FrameDriver::new(config);
+    fn driver_returns_ready_frames_during_the_callback() {
+        for demand in [
+            FrameDemand::INPUT,
+            FrameDemand::ANIMATION,
+            FrameDemand::BACKGROUND,
+        ] {
+            let mut driver = FrameDriver::new(SchedulerConfig::pacing_only(TIMEBASE));
+            driver.request(demand);
+            let opportunity = frame_opportunity(test_tick(), DEFAULT_REFRESH_INTERVAL);
 
-        driver.request(FrameDemand::INPUT);
-        let opportunity = frame_opportunity(tick, DEFAULT_REFRESH_INTERVAL);
-
-        assert!(matches!(
-            driver.begin_frame(opportunity).result,
-            FrameBeginResult::Ready(_)
-        ));
+            let FrameBeginResult::Ready(frame) = driver.begin_frame(opportunity).result else {
+                panic!("{demand:?} must be ready in the callback");
+            };
+            assert_eq!(frame.plan().frame_start, test_tick().now);
+        }
     }
 }

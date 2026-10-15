@@ -69,9 +69,9 @@ let raf = RafLoop::new(
                 );
                 _ = (sample_time, submit.summary);
             }
-            FrameBeginResult::WaitUntil(frame_start) => {
-                // Mirror frame_start into the host's timer/redraw machinery.
-                _ = frame_start;
+            FrameBeginResult::WaitUntil(_) => {
+                // Web hints start each frame at the tick, so this does not
+                // happen.
             }
             FrameBeginResult::Expired(summary) => {
                 // Record the dropped-frame summary and request fresh demand if needed.
@@ -92,8 +92,8 @@ The root module exposes the browser integration surface:
 
 - `RafLoop` for `requestAnimationFrame` callbacks.
 - `now` and `timebase` for browser host-time conversion.
-- `present_hints`, `display_timing`, and `frame_opportunity` for hosts that own
-  `FrameDriver` directly.
+- `present_hints`, `display_timing`, and `frame_opportunity`, plus
+  `_with_commit_lead` variants, for hosts that own `FrameDriver` directly.
 - `DEFAULT_REFRESH_INTERVAL` for conservative pacing fallback.
 
 `frameclock_web` keeps platform-specific browser code out of `frameclock`
@@ -111,8 +111,13 @@ content-frame identity; retained hosts get `FramePlan::frame_index` from
 to `Scheduler::plan` and `FrameTickEvent::new`.
 
 Because RAF is pacing-only, `PresentHints::desired_present` is `None` and
-`PresentHints::latest_commit` is one fallback refresh interval after the RAF
-tick time. Hosts that can get richer browser timing from media APIs, such as
+`PresentHints::latest_commit` is a commit lead before one refresh interval
+after the RAF tick time. By default the lead is a quarter of the interval; use
+`frame_opportunity_with_commit_lead` when the host has a better estimate of the
+time the browser needs after the callback. A browser shows only what is drawn
+during the callback, so the hints start each frame at the tick and
+`FrameDriver::begin_frame` returns a ready frame during the callback instead of
+`WaitUntil`. Hosts that can get richer browser timing from media APIs, such as
 video frame callbacks, should build their own `FrameOpportunity` or use a
 future media-specific adapter instead of forcing that data through plain RAF.
 
