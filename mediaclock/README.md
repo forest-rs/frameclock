@@ -24,7 +24,9 @@ frameclock FramePlan sample/target host time
              -> host chooses media content
 ```
 
-Use `MediaTimeline` for ordinary playback timelines. Feed observations from a
+Use `MediaTimeline` for ordinary playback timelines. Create it with
+`MediaTimeline::for_timebase` and the platform adapter's `timebase()`, so it
+reads host times in the same ticks as `frameclock`. Feed observations from a
 media backend with `observe`, call `set_paused` when playback pauses or resumes,
 call `reanchor` for known discontinuities such as seek or loop boundaries, and
 query `media_time_at` with a frameclock `HostTime`.
@@ -34,9 +36,12 @@ mapping without playback-rate and discontinuity policy.
 
 ```rust,ignore
 use frameclock::HostTime;
+use frameclock::time::Timebase;
 use mediaclock::MediaTimeline;
 
-let mut timeline = MediaTimeline::new(1e-9);
+// Host times here are nanoseconds. Pass the platform adapter's timebase
+// instead, such as `frameclock_apple::timebase()`.
+let mut timeline = MediaTimeline::for_timebase(Timebase::NANOS);
 
 // Observation from a media backend: at host time 1s, media PTS was 1s.
 timeline.observe(HostTime(1_000_000_000), 1.0);
