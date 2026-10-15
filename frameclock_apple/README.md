@@ -47,7 +47,9 @@ use frameclock::{
 use frameclock_apple::DisplayLink;
 use objc2::MainThreadMarker;
 
-let mut driver = FrameDriver::new(SchedulerConfig::predictive());
+let mut driver = FrameDriver::new(SchedulerConfig::predictive(
+    frameclock_apple::timebase(),
+));
 let display_timing = DisplayTiming::fixed(Duration(16_666_667));
 let output = OutputId(0);
 let mtm = MainThreadMarker::new().unwrap();

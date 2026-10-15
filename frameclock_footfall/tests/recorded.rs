@@ -379,7 +379,7 @@ fn a_pacing_only_frame_records_no_present_times() {
 fn syncs_and_frames_are_in_frameclock_terms() {
     let (backend, _serial) = recording();
     let recorder = Recorder::new(MACH);
-    let mut driver = frameclock::FrameDriver::new(frameclock::SchedulerConfig::pacing_only());
+    let mut driver = frameclock::FrameDriver::new(frameclock::SchedulerConfig::pacing_only(MACH));
     driver.request(FrameDemand::INPUT);
 
     recorder.sync(HostTime(24_000_000));

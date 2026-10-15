@@ -38,8 +38,9 @@
 //! use frameclock_footfall::Recorder;
 //!
 //! // Use the platform adapter's timebase, such as `frameclock_apple::timebase()`.
-//! let recorder = Recorder::new(Timebase::NANOS);
-//! let mut driver = FrameDriver::new(SchedulerConfig::pacing_only());
+//! let timebase = Timebase::NANOS;
+//! let recorder = Recorder::new(timebase);
+//! let mut driver = FrameDriver::new(SchedulerConfig::pacing_only(timebase));
 //! driver.request(FrameDemand::ANIMATION);
 //!
 //! let now = HostTime(1_000_000);

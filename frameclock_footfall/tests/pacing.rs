@@ -43,7 +43,7 @@ fn pacing_judges_frames_and_predictions_from_what_frameclock_learned() {
         .install_global()
         .expect("nothing else installs a backend");
     let recorder = Recorder::new(Timebase::NANOS);
-    let mut driver = FrameDriver::new(SchedulerConfig::predictive());
+    let mut driver = FrameDriver::new(SchedulerConfig::predictive(Timebase::NANOS));
 
     // The simulation's host clock runs far ahead of the runtime's real one,
     // so it is synced once: Footfall then places host times at the declared

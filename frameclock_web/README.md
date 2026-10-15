@@ -49,7 +49,9 @@ use frameclock::{
 };
 use frameclock_web::{DEFAULT_REFRESH_INTERVAL, RafLoop};
 
-let mut driver = FrameDriver::new(SchedulerConfig::pacing_only());
+let mut driver = FrameDriver::new(SchedulerConfig::pacing_only(
+    frameclock_web::TIMEBASE,
+));
 
 let raf = RafLoop::new(
     move |tick| {
