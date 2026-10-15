@@ -66,7 +66,7 @@
 //! use frameclock::time::Timebase;
 //! use frameclock::{
 //!     Duration, FrameBeginResult, FrameDemand, FrameDriver, FrameOpportunity,
-//!     FrameSubmission, HostTime, OutputId, SchedulerConfig,
+//!     FrameSubmission, FrameWait, HostTime, OutputId, SchedulerConfig,
 //! };
 //!
 //! // Host times here are nanoseconds. Pass the platform adapter's timebase
@@ -103,9 +103,12 @@
 //!         );
 //!         _ = submit.summary;
 //!     }
-//!     FrameBeginResult::WaitUntil(frame_start) => {
+//!     FrameBeginResult::Wait(FrameWait::Until(frame_start)) => {
 //!         // Wake at `frame_start`, then call `begin_pending_frame`.
 //!         _ = frame_start;
+//!     }
+//!     FrameBeginResult::Wait(FrameWait::NextTick) => {
+//!         // A later tick starts the frame.
 //!     }
 //!     FrameBeginResult::Expired(summary) => {
 //!         // The queued plan missed its commit deadline before it was released.
@@ -157,7 +160,7 @@ pub use demand::FrameDemand;
 pub use diagnostics::FrameTimingSummary;
 pub use driver::{
     ActiveFrame, FrameBegin, FrameBeginResult, FrameDriver, FrameReport, FrameSubmission,
-    FrameSubmitResult, PresentOutcome, PresentationObservation, REPORTED_FRAME_CAPACITY,
+    FrameSubmitResult, FrameWait, PresentOutcome, PresentationObservation, REPORTED_FRAME_CAPACITY,
 };
 pub use output::OutputId;
 pub use scheduler::SchedulerConfig;

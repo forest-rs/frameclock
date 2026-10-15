@@ -69,9 +69,9 @@ let raf = RafLoop::new(
                 );
                 _ = (sample_time, submit.summary);
             }
-            FrameBeginResult::WaitUntil(frame_start) => {
-                // Mirror frame_start into the host's timer/redraw machinery.
-                _ = frame_start;
+            FrameBeginResult::Wait(wait) => {
+                // Mirror the wait into the host's timer/redraw machinery.
+                _ = wait;
             }
             FrameBeginResult::Expired(summary) => {
                 // Record the dropped-frame summary and request fresh demand if needed.
