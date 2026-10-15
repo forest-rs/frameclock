@@ -45,6 +45,7 @@ pub use cv_display_link::DisplayLinkError;
 pub use threading::{TickForwarder, TickSender};
 
 use frameclock::time::Timebase;
+use frameclock::timing::{PresentationTiming, default_commit_lead};
 use frameclock::{
     ActiveFrame, DisplayTiming, Duration, FrameOpportunity, FrameSubmission, FrameTick, HostTime,
     PresentHints,
@@ -62,39 +63,17 @@ pub fn timebase() -> Timebase {
     mach_time::timebase()
 }
 
-/// Returns the default commit lead for a refresh interval.
-///
-/// Apple display-link predictions describe a presentation slot, not a promise
-/// that app work can be committed at the last possible tick. Use a small
-/// platform-side lead so `PresentHints::latest_commit` remains a commit
-/// boundary, while `frameclock` still owns learned app build margins.
-#[must_use]
-pub const fn default_commit_lead(refresh_interval: Duration) -> Duration {
-    refresh_interval.div_u64(4)
-}
-
-fn refresh_interval_for_tick(tick: &FrameTick, fallback_refresh_interval: Duration) -> Duration {
-    tick.refresh_interval
-        .filter(|interval| !interval.is_zero())
-        .unwrap_or(fallback_refresh_interval)
-}
-
-fn commit_boundary(target: HostTime, lead: Duration, floor: HostTime) -> HostTime {
-    target.checked_sub(lead).unwrap_or(floor).max(floor)
-}
-
-/// Computes [`PresentHints`] from an Apple display-link tick using the default
-/// commit lead.
+/// Computes [`PresentHints`] from an Apple display-link tick using
+/// [`default_commit_lead`].
 ///
 /// Use [`present_hints_with_commit_lead`] when a host has a platform-specific
 /// commit lead estimate.
 #[must_use]
 pub fn present_hints(tick: &FrameTick, fallback_refresh_interval: Duration) -> PresentHints {
-    let refresh_interval = refresh_interval_for_tick(tick, fallback_refresh_interval);
     present_hints_with_commit_lead(
         tick,
         fallback_refresh_interval,
-        default_commit_lead(refresh_interval),
+        default_commit_lead(tick.refresh_interval_or(fallback_refresh_interval)),
     )
 }
 
@@ -102,31 +81,22 @@ pub fn present_hints(tick: &FrameTick, fallback_refresh_interval: Duration) -> P
 ///
 /// Fresh `CADisplayLink.targetTimestamp` / `CVDisplayLink` output times are
 /// treated as predictive present targets. If the prediction is missing or
-/// stale, the hint falls back to pacing-only timing with a one-refresh commit
-/// boundary. The scheduler applies its own learned build margin later when it
-/// turns these platform facts into a [`frameclock::timing::FramePlan`].
+/// stale, the hint falls back to pacing-only timing aimed one refresh after
+/// the tick, as described by [`PresentHints::for_tick`]. The scheduler applies
+/// its own learned build margin later when it turns these platform facts into
+/// a [`frameclock::timing::FramePlan`].
 #[must_use]
 pub fn present_hints_with_commit_lead(
     tick: &FrameTick,
     fallback_refresh_interval: Duration,
     commit_lead: Duration,
 ) -> PresentHints {
-    let refresh_interval = refresh_interval_for_tick(tick, fallback_refresh_interval);
-    if let Some(predicted_present) = tick
-        .predicted_present
-        .filter(|predicted_present| *predicted_present >= tick.now)
-    {
-        return PresentHints::predictive(
-            predicted_present,
-            commit_boundary(predicted_present, commit_lead, tick.now),
-        );
-    }
-
-    let pacing_target = tick
-        .now
-        .checked_add(refresh_interval)
-        .unwrap_or(HostTime(u64::MAX));
-    PresentHints::pacing_only(commit_boundary(pacing_target, commit_lead, tick.now))
+    PresentHints::for_tick(
+        tick,
+        PresentationTiming::Predictive,
+        fallback_refresh_interval,
+        commit_lead,
+    )
 }
 
 /// Converts a Core Animation media time to [`HostTime`].
@@ -168,7 +138,7 @@ pub fn display_timing(tick: &FrameTick, fallback_timing: DisplayTiming) -> Displ
 /// so the scheduler can choose a cadence within the output's supported range.
 #[must_use]
 pub fn frame_opportunity(tick: FrameTick, fallback_timing: DisplayTiming) -> FrameOpportunity {
-    let refresh_interval = refresh_interval_for_tick(&tick, fallback_timing.min_interval());
+    let refresh_interval = tick.refresh_interval_or(fallback_timing.min_interval());
     frame_opportunity_with_commit_lead(tick, fallback_timing, default_commit_lead(refresh_interval))
 }
 
@@ -312,7 +282,6 @@ fn fps_for_interval(interval: Duration, timebase: Timebase) -> Option<f32> {
 mod tests {
     use super::*;
     use frameclock::OutputId;
-    use frameclock::timing::PresentationTiming;
 
     fn tick(predicted_present: Option<HostTime>) -> FrameTick {
         FrameTick {

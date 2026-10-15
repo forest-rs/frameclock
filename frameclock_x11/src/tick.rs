@@ -5,6 +5,7 @@
 
 use crate::queue::BoundedQueue;
 use crate::time::{Clock, ust_to_host_time};
+use frameclock::timing::next_refresh;
 use frameclock::{Duration, FrameTick, HostTime, OutputId};
 
 const MICROS_TO_NANOS: u64 = 1_000;
@@ -247,21 +248,14 @@ fn refresh_interval_from_samples(
 /// Predicts the next vblank at or after `now` from the last observed present.
 ///
 /// Returns `None` when no refresh interval has been established, leaving the
-/// tick pacing-only. Otherwise it advances the last actual-present time by whole
-/// refresh intervals until it reaches `now`, landing on the display's vblank
-/// grid.
+/// tick pacing-only. Otherwise it is the next refresh on the display's vblank
+/// grid, as found by [`next_refresh`].
 fn predict_next_present(
     last_actual: HostTime,
     refresh_interval: Option<Duration>,
     now: HostTime,
 ) -> Option<HostTime> {
-    let refresh = refresh_interval
-        .filter(|interval| !interval.is_zero())?
-        .ticks();
-    let elapsed = now.ticks().saturating_sub(last_actual.ticks());
-    let intervals = elapsed.div_ceil(refresh);
-    let advance = intervals.checked_mul(refresh)?;
-    last_actual.ticks().checked_add(advance).map(HostTime)
+    next_refresh(last_actual, refresh_interval?, now)
 }
 
 #[cfg(test)]

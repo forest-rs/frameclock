@@ -4,6 +4,7 @@
 //! `FrameTick` construction from QPC reads.
 
 use frameclock::time::Timebase;
+use frameclock::timing::next_refresh;
 use frameclock::{Duration, FrameTick, HostTime, OutputId};
 
 /// Build a [`FrameTick`] from QPC. Call inside a `VSync`-paced tick handler.
@@ -33,14 +34,13 @@ fn tick_at(
     refresh_interval_ns: u64,
     prev_present_time: Option<HostTime>,
 ) -> FrameTick {
-    let interval_ticks = timebase.nanos_to_ticks(refresh_interval_ns);
-    let predicted_present =
-        (interval_ticks > 0).then(|| predict_next_present(now, interval_ticks, prev_present_time));
+    let interval = Duration(timebase.nanos_to_ticks(refresh_interval_ns));
+    let predicted_present = predict_next_present(now, interval, prev_present_time);
 
     FrameTick {
         now,
         predicted_present,
-        refresh_interval: (interval_ticks > 0).then_some(Duration(interval_ticks)),
+        refresh_interval: (!interval.is_zero()).then_some(interval),
         output: OutputId(0),
         prev_actual_present: prev_present_time,
     }
@@ -48,23 +48,19 @@ fn tick_at(
 
 /// Predicts the next refresh from the previous present, or from `now`.
 ///
-/// A previous present is advanced by whole refresh intervals until it reaches
-/// `now`, so a host that was idle for many refreshes still predicts a time on
-/// the display's refresh grid rather than one in the past. Saturates at
-/// `HostTime(u64::MAX)`.
+/// A previous present gives the next refresh at or after `now` on its grid,
+/// as found by [`next_refresh`]. Saturates at `HostTime(u64::MAX)`.
 fn predict_next_present(
     now: HostTime,
-    interval_ticks: u64,
+    interval: Duration,
     prev_present_time: Option<HostTime>,
-) -> HostTime {
-    let Some(prev) = prev_present_time else {
-        return HostTime(now.ticks().saturating_add(interval_ticks));
-    };
-    let elapsed = now.ticks().saturating_sub(prev.ticks());
-    let advance = elapsed
-        .div_ceil(interval_ticks)
-        .saturating_mul(interval_ticks);
-    HostTime(prev.ticks().saturating_add(advance))
+) -> Option<HostTime> {
+    match prev_present_time {
+        Some(prev) => next_refresh(prev, interval, now),
+        None => {
+            (!interval.is_zero()).then(|| HostTime(now.ticks().saturating_add(interval.ticks())))
+        }
+    }
 }
 
 #[cfg(test)]
