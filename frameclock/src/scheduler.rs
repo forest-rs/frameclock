@@ -540,22 +540,27 @@ impl Scheduler {
         source_interval: Duration,
         build_cost: Duration,
     ) -> Duration {
-        let source_interval = if source_interval.is_zero() {
+        // The fastest cadence on offer. A fixed display refreshes at the
+        // tick's interval. A variable one ticks at whatever interval it last
+        // ran at, which says nothing about how fast it can go, so its range
+        // decides: otherwise a display that slowed down could never speed
+        // back up.
+        let fastest = if display.is_variable() || source_interval.is_zero() {
             display.min_interval()
         } else {
             source_interval
         };
         let policy = demand.dominant_class();
         let needed = match policy {
-            FrameDemandClass::None | FrameDemandClass::Input => return source_interval,
+            FrameDemandClass::None | FrameDemandClass::Input => return fastest,
             FrameDemandClass::ContinuousInput => build_cost,
-            FrameDemandClass::Animation => build_cost.saturating_add(source_interval.div_u64(4)),
+            FrameDemandClass::Animation => build_cost.saturating_add(fastest.div_u64(4)),
             FrameDemandClass::Background => build_cost
-                .saturating_add(source_interval.div_u64(4))
-                .max(source_interval.saturating_mul(2)),
+                .saturating_add(fastest.div_u64(4))
+                .max(fastest.saturating_mul(2)),
         };
 
-        display.choose_interval(needed).max(source_interval)
+        display.choose_interval(needed).max(fastest)
     }
 
     fn frame_start(
@@ -1114,6 +1119,28 @@ mod tests {
         let plan = sched.plan(opportunity, FrameDemand::ANIMATION, 1);
         assert_eq!(plan.frame_start, HostTime(1_000));
         assert_eq!(plan.commit_deadline, HostTime(9_000));
+    }
+
+    #[test]
+    fn variable_refresh_speeds_back_up_after_running_slowly() {
+        let mut sched = Scheduler::new(SchedulerConfig::predictive(Timebase::NANOS));
+        // An 8-32 ms display whose last ticks came at its slowest rate.
+        let mut opportunity = make_opportunity(
+            PresentationTiming::Predictive,
+            1_000,
+            Some(33_001_000),
+            32_001_000,
+        );
+        opportunity.tick.refresh_interval = Some(Duration(32_000_000));
+        opportunity.display_timing =
+            DisplayTiming::variable(Duration(8_000_000), Duration(32_000_000), None);
+
+        for demand in [FrameDemand::INPUT, FrameDemand::ANIMATION] {
+            let plan = sched.plan(opportunity, demand, 0);
+            assert_eq!(plan.frame_interval, Duration(8_000_000), "{demand:?}");
+        }
+        let plan = sched.plan(opportunity, FrameDemand::BACKGROUND, 0);
+        assert_eq!(plan.frame_interval, Duration(16_000_000));
     }
 
     #[test]
