@@ -11,6 +11,7 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::pin::Pin;
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use dispatch2::{DispatchQueue, MainThreadBound};
 use frameclock::time::Timebase;
@@ -51,12 +52,18 @@ impl fmt::Display for CvDisplayLinkError {
 
 impl core::error::Error for CvDisplayLinkError {}
 
-/// The host callback, shared with the display-link thread but only ever
-/// borrowed on the main thread.
-type MainThreadCallback = Arc<MainThreadBound<RefCell<Box<dyn FnMut(FrameTick)>>>>;
+type HostCallback = RefCell<Box<dyn FnMut(FrameTick)>>;
+
+/// What the display-link thread shares with the main thread.
+struct Shared {
+    /// The host callback, only ever borrowed on the main thread.
+    callback: MainThreadBound<HostCallback>,
+    /// The number of the newest tick dispatched to the main thread.
+    latest_tick: AtomicU64,
+}
 
 struct CallbackState {
-    callback: MainThreadCallback,
+    shared: Arc<Shared>,
     output: OutputId,
     timebase: Timebase,
 }
@@ -67,6 +74,11 @@ struct CallbackState {
 /// Core Video calls the display link on its own thread. Each tick is
 /// dispatched to the main queue and passed to the callback there, so the
 /// callback can own main-thread state without `Send` or `Sync`.
+///
+/// A busy main thread delays that dispatch, so a tick's
+/// [`FrameTick::now`] is read when it reaches the main thread, not when
+/// Core Video produced it, and a prediction that has passed by then is
+/// stale. Ticks that a newer tick overtook while waiting are dropped.
 pub struct CvDisplayLink {
     raw: CFRetained<CVDisplayLinkRaw>,
     _state: Pin<Box<CallbackState>>,
@@ -124,7 +136,10 @@ impl CvDisplayLink {
     {
         let callback: Box<dyn FnMut(FrameTick)> = Box::new(callback);
         let state = Box::pin(CallbackState {
-            callback: Arc::new(MainThreadBound::new(RefCell::new(callback), mtm)),
+            shared: Arc::new(Shared {
+                callback: MainThreadBound::new(RefCell::new(callback), mtm),
+                latest_tick: AtomicU64::new(0),
+            }),
             output,
             timebase: crate::mach_time::timebase(),
         });
@@ -238,7 +253,7 @@ impl Drop for CvDisplayLink {
 
 unsafe extern "C-unwind" fn display_link_callback(
     _display_link: NonNull<CVDisplayLinkRaw>,
-    in_now: NonNull<CVTimeStamp>,
+    _in_now: NonNull<CVTimeStamp>,
     in_output_time: NonNull<CVTimeStamp>,
     _flags_in: u64,
     _flags_out: NonNull<u64>,
@@ -246,10 +261,8 @@ unsafe extern "C-unwind" fn display_link_callback(
 ) -> i32 {
     let state = unsafe { &*(user_info.cast::<CallbackState>()) };
 
-    let now_ts = unsafe { in_now.as_ref() };
     let out_ts = unsafe { in_output_time.as_ref() };
 
-    let now = HostTime(now_ts.hostTime);
     let predicted_present = has_flag(out_ts.flags, CVTimeStampFlags::HostTimeValid)
         .then_some(HostTime(out_ts.hostTime));
     // The output time is when the next frame is shown, not one refresh
@@ -262,21 +275,28 @@ unsafe extern "C-unwind" fn display_link_callback(
         state.timebase,
     );
 
-    let tick = FrameTick {
-        now,
-        predicted_present,
-        refresh_interval,
-        output: state.output,
-        prev_actual_present: None,
-    };
-
-    let callback = Arc::clone(&state.callback);
+    let output = state.output;
+    let shared = Arc::clone(&state.shared);
+    let number = shared.latest_tick.fetch_add(1, Ordering::Relaxed) + 1;
     DispatchQueue::main().exec_async(move || {
+        if shared.latest_tick.load(Ordering::Relaxed) != number {
+            // A newer tick is already queued behind this one.
+            return;
+        }
         // SAFETY: Work submitted to the main queue runs on the main thread.
         let mtm = unsafe { MainThreadMarker::new_unchecked() };
-        if let Ok(mut callback) = callback.get(mtm).try_borrow_mut() {
-            callback(tick);
-        }
+        let Ok(mut callback) = shared.callback.get(mtm).try_borrow_mut() else {
+            return;
+        };
+        // How long the tick waited for the main thread is time the host
+        // no longer has, so `now` is read here.
+        callback(FrameTick {
+            now: crate::mach_time::now(),
+            predicted_present,
+            refresh_interval,
+            output,
+            prev_actual_present: None,
+        });
     });
 
     kCVReturnSuccess
