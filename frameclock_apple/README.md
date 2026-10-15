@@ -129,6 +129,9 @@ tracing, or external diagnostics.
 `prev_actual_present`, except on the first tick after the link is created,
 paused, or stopped. `CVDisplayLink` ticks carry the output host time as
 `predicted_present` and the display's refresh period as `refresh_interval`.
+Their `now` is read when the tick reaches the main thread, so time spent
+waiting for a busy main thread is not counted as time the host still has. A
+tick overtaken by a newer one while it waits is dropped.
 
 Every `Duration` and `DisplayTiming` passed alongside these ticks is in Mach
 ticks too. Convert nanosecond values with `Duration::from_nanos(nanos,
