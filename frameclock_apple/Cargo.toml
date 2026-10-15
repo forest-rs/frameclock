@@ -17,6 +17,13 @@ ca-display-link = [
   "objc2-quartz-core/CADisplayLink",
   "objc2-quartz-core/CAFrameRateRange",
 ]
+metal-display-link = [
+  "objc2-quartz-core/CALayer",
+  "objc2-quartz-core/CAMetalDisplayLink",
+  "objc2-quartz-core/CAMetalLayer",
+  "objc2-quartz-core/CAFrameRateRange",
+  "objc2-quartz-core/objc2-metal",
+]
 
 [lints]
 workspace = true

@@ -4,17 +4,20 @@
 //! Apple display-link timing adapters for [`frameclock`].
 //!
 //! This crate owns Apple-specific timing adaptation. It converts
-//! `CADisplayLink` and `CVDisplayLink` callbacks into [`FrameTick`] values,
+//! `CADisplayLink`, `CVDisplayLink`, and `CAMetalDisplayLink` callbacks into
+//! [`FrameTick`] values,
 //! exposes Mach absolute time as [`HostTime`], and converts display-link ticks
 //! into [`FrameOpportunity`] values for callers that own a
 //! [`frameclock::FrameDriver`].
 //!
-//! The `ca-display-link` feature (on by default) provides `CaDisplayLink`
-//! and the `cv-display-link` feature provides `CvDisplayLink` on macOS. The
-//! features are independent: enable either or both.
+//! The `ca-display-link` feature (on by default) provides `CaDisplayLink`,
+//! the `cv-display-link` feature provides `CvDisplayLink` on macOS, and the
+//! `metal-display-link` feature provides `CaMetalDisplayLink`, which hands a
+//! Metal renderer each frame's drawable with its deadline and target. The
+//! features are independent: enable any of them.
 //!
-//! It intentionally does not own `CALayer` trees, `CAMetalLayer` presentation,
-//! renderers, windows, or app event-loop policy.
+//! It intentionally does not own `CALayer` trees, renderers, windows, or app
+//! event-loop policy.
 //!
 //! This crate keeps its own implementation `no_std`, but the selected
 //! Objective-C framework bindings currently require `std`. It is intended to be
@@ -36,11 +39,15 @@ mod wake;
 mod ca_display_link;
 #[cfg(all(feature = "cv-display-link", target_os = "macos"))]
 mod cv_display_link;
+#[cfg(feature = "metal-display-link")]
+mod metal_display_link;
 
 #[cfg(feature = "ca-display-link")]
 pub use ca_display_link::CaDisplayLink;
 #[cfg(all(feature = "cv-display-link", target_os = "macos"))]
 pub use cv_display_link::{CvDisplayLink, CvDisplayLinkError};
+#[cfg(feature = "metal-display-link")]
+pub use metal_display_link::{CaMetalDisplayLink, CaMetalDisplayLinkError, MetalTick};
 pub use wake::wake_at;
 
 use frameclock::time::Timebase;
@@ -227,7 +234,7 @@ pub enum AppleFeedbackMode {
     CommitOnly,
     /// Each frame's fate arrives later, from its own drawable.
     ///
-    /// This is the path for a Metal renderer: submit with
+    /// This is the `CAMetalDisplayLink` path: submit with
     /// [`FrameSubmission::reported`] and report the drawable's presented
     /// time, converted by [`presented_outcome`], through
     /// [`frameclock::FrameDriver::report_frame`].
