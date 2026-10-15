@@ -178,7 +178,7 @@ impl DisplayTiming {
 
         let clamped = clamp_duration(needed, self.min_interval, self.max_interval);
         match self.granularity {
-            Some(step) if !step.is_zero() && step != self.min_interval => clamp_duration(
+            Some(step) if !step.is_zero() => clamp_duration(
                 round_up_to_multiple(clamped, step),
                 self.min_interval,
                 self.max_interval,
@@ -780,6 +780,25 @@ mod tests {
         let display = DisplayTiming::from_tick(&tick, Duration(16_666_667));
 
         assert_eq!(display, DisplayTiming::fixed(Duration(16_666_667)));
+    }
+
+    #[test]
+    fn variable_timing_rounds_to_its_granularity() {
+        let needed = Duration(10_000_000);
+        let stepped = DisplayTiming::variable(
+            Duration(8_000_000),
+            Duration(32_000_000),
+            Some(Duration(4_000_000)),
+        );
+        assert_eq!(stepped.choose_interval(needed), Duration(12_000_000));
+
+        // A step equal to the minimum interval is still a step.
+        let stepped_by_min = DisplayTiming::variable(
+            Duration(8_000_000),
+            Duration(32_000_000),
+            Some(Duration(8_000_000)),
+        );
+        assert_eq!(stepped_by_min.choose_interval(needed), Duration(16_000_000));
     }
 
     #[test]
