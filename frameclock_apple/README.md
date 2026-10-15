@@ -30,8 +30,8 @@ Use `CaDisplayLink` or `CvDisplayLink` when an application wants this crate
 to create an Apple display-link tick source. The default `ca-display-link`
 feature exposes `CaDisplayLink`, a main-thread `CADisplayLink` wrapper. The
 `cv-display-link` feature exposes `CvDisplayLink`, a legacy macOS
-`CVDisplayLink` wrapper, and forwarding types for sending its ticks to a
-single-threaded host scheduler.
+`CVDisplayLink` wrapper. Both take an `FnMut` callback and call it on the main
+thread, so it can own the host's scheduler state.
 
 Use `FrameDriver` when an application wants retained frame lifecycle state:
 pending demand, queued frame-start plans, stronger-demand preemption, submission
@@ -41,8 +41,6 @@ acquire native presentation resources, and how to submit to Core Animation or
 Metal.
 
 ```rust,ignore
-use core::cell::RefCell;
-
 use frameclock::{
     DisplayTiming, Duration, FrameBeginResult, FrameDemand, FrameDriver,
     OutputId, SchedulerConfig,
@@ -50,9 +48,8 @@ use frameclock::{
 use frameclock_apple::CaDisplayLink;
 use objc2::MainThreadMarker;
 
-// The display-link callback is a shared `Fn`, so it borrows the driver
-// mutably through a `RefCell`.
-let driver = RefCell::new(FrameDriver::new(SchedulerConfig::predictive()));
+// The display-link callback runs on the main thread and may own the driver.
+let mut driver = FrameDriver::new(SchedulerConfig::predictive());
 // Host times are Mach ticks, so convert nanosecond intervals first.
 let display_timing = DisplayTiming::fixed(Duration::from_nanos(
     16_666_667,
@@ -63,7 +60,6 @@ let mtm = MainThreadMarker::new().unwrap();
 
 let display_link = CaDisplayLink::new(
     move |tick| {
-        let mut driver = driver.borrow_mut();
         driver.request(FrameDemand::ANIMATION);
 
         let opportunity = frameclock_apple::frame_opportunity(tick, display_timing);
@@ -114,8 +110,7 @@ The root module exposes the Apple integration surface:
 - `preferred_frame_rate_range`, `preferred_frame_rate_range_for_frame`, and
   `PreferredFrameRateRange` for translating a selected frame interval into a
   Core Animation-style ProMotion cadence request.
-- `TickForwarder`, `TickSender`, and `CvDisplayLinkError` with the
-  `cv-display-link` feature on macOS.
+- `CvDisplayLinkError` with the `cv-display-link` feature on macOS.
 
 `frameclock_apple` keeps Apple FFI and thread-model details out of
 `frameclock` proper. Core scheduling policy, frame demand ordering, frame
@@ -172,9 +167,9 @@ and use `preferred_frame_rate_range_for_frame`,
 
 - `ca-display-link`: enables `CADisplayLink` support and is enabled by
   default.
-- `cv-display-link`: enables legacy `CVDisplayLink` support on macOS. This
-  feature is intended for hosts that need a Core Video display link and a
-  forwarding path back to a single-threaded scheduler.
+- `cv-display-link`: enables legacy `CVDisplayLink` support on macOS, for
+  hosts that need a Core Video display link. Its ticks are forwarded from the
+  Core Video thread to the main thread.
 
 The features are independent, so enabling one never removes the other's
 types.
