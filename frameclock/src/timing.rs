@@ -624,6 +624,13 @@ impl PresentFeedback {
     /// When the frame cannot be classified as a real hit or miss,
     /// [`PresentFeedback::pacing_overrun`] is populated from commit timing as
     /// the weaker pacing signal.
+    ///
+    /// Hints carry no frame interval or plan, so this differs from
+    /// [`Self::new`] in two ways. Its miss test has no tolerance: a frame
+    /// shown at its planned refresh but timestamped slightly after the target
+    /// counts as missed. And [`present_latency`](Self::present_latency) is
+    /// zero, so a scheduler using latency compensation would read the whole
+    /// compensated lateness as new; set it from the plan before observing.
     #[must_use]
     pub fn from_hints(
         hints: &PresentHints,
