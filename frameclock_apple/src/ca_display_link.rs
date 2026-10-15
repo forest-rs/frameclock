@@ -12,7 +12,7 @@ use frameclock::{DisplayTiming, Duration, FrameTick, HostTime, OutputId};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_foundation::{NSDefaultRunLoopMode, NSObject, NSObjectProtocol, NSRunLoop};
+use objc2_foundation::{NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes};
 use objc2_quartz_core::{CACurrentMediaTime, CADisplayLink as CADisplayLinkRaw, CAFrameRateRange};
 
 use crate::{PreferredFrameRateRange, mach_time, preferred_frame_rate_range};
@@ -147,11 +147,15 @@ impl DisplayLink {
     }
 
     /// Starts the display link by adding it to the main run loop.
+    ///
+    /// The link is added in the common run-loop modes, so it keeps ticking
+    /// while the run loop tracks events, such as during a live window resize
+    /// or an open menu.
     pub fn start(&self) {
         let run_loop = NSRunLoop::mainRunLoop();
         unsafe {
             self.raw
-                .addToRunLoop_forMode(&run_loop, NSDefaultRunLoopMode);
+                .addToRunLoop_forMode(&run_loop, NSRunLoopCommonModes);
         }
     }
 
@@ -163,7 +167,7 @@ impl DisplayLink {
         let run_loop = NSRunLoop::mainRunLoop();
         unsafe {
             self.raw
-                .removeFromRunLoop_forMode(&run_loop, NSDefaultRunLoopMode);
+                .removeFromRunLoop_forMode(&run_loop, NSRunLoopCommonModes);
         }
         self.target.forget_previous_timestamp();
     }
