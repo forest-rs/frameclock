@@ -440,6 +440,8 @@ pub struct PresentHints {
     latest_commit: HostTime,
     /// Whether frame work must start at the tick that offered it.
     starts_at_tick: bool,
+    /// Whether [`Self::latest_commit`] is a limit the scheduler must keep.
+    hard_deadline: bool,
 }
 
 impl PresentHints {
@@ -465,6 +467,7 @@ impl PresentHints {
             desired_present,
             latest_commit,
             starts_at_tick: false,
+            hard_deadline: false,
         }
     }
 
@@ -534,6 +537,33 @@ impl PresentHints {
     #[must_use]
     pub const fn starts_at_tick(self) -> bool {
         self.starts_at_tick
+    }
+
+    /// Returns these hints with [`latest_commit`](Self::latest_commit) as a
+    /// hard limit.
+    ///
+    /// Use this when the opportunity hands the host a resource that must be
+    /// committed by then, such as a Metal drawable that has to be presented
+    /// before its update's deadline. The scheduler then never plans the
+    /// frame's [`FramePlan::commit_deadline`] past it: it adds no
+    /// pipeline-depth lookahead, which cannot give that resource more time,
+    /// and a frame whose deadline has already passed when it is planned or
+    /// released expires instead of starting. A frame the cadence holds back
+    /// until a later tick is held to the deadline of the opportunity that
+    /// releases it.
+    #[inline]
+    #[must_use]
+    pub const fn with_hard_deadline(mut self) -> Self {
+        self.hard_deadline = true;
+        self
+    }
+
+    /// Returns whether [`latest_commit`](Self::latest_commit) is a hard
+    /// limit. See [`with_hard_deadline`](Self::with_hard_deadline).
+    #[inline]
+    #[must_use]
+    pub const fn has_hard_deadline(self) -> bool {
+        self.hard_deadline
     }
 
     /// Creates predictive present hints.
