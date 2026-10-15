@@ -947,6 +947,17 @@ impl FrameDriver {
 
     fn take_next(&mut self, opportunity: FrameOpportunity) -> DriverBeginResult {
         let tick = opportunity.tick;
+        if opportunity.hints.has_hard_deadline()
+            && let Some(frame) = self.pending_frame.as_mut()
+            && tick.now >= frame.plan.frame_start
+        {
+            // The releasing opportunity's resource is the one the frame will
+            // use, so its deadline is the one that binds, earlier or later
+            // than planned, as when the tick the plan expected never came. A
+            // tick the frame still waits through offers a resource it will
+            // not use.
+            frame.plan.commit_deadline = opportunity.hints.latest_commit();
+        }
         if let Some(result) = self.take_pending(tick.now) {
             return result;
         }
@@ -2012,6 +2023,130 @@ mod tests {
         ));
         assert!(begin.resolved_feedback.is_some());
         assert!(!driver.needs_tick());
+    }
+
+    /// A drawable-style opportunity: start at the tick, commit by `deadline`.
+    fn hard_deadline_opportunity(now: u64, deadline: u64) -> FrameOpportunity {
+        FrameOpportunity::new(
+            tick(now, 0),
+            PresentHints::pacing_only(HostTime(deadline))
+                .starting_at_tick()
+                .with_hard_deadline(),
+            DisplayTiming::fixed(REFRESH_INTERVAL),
+        )
+    }
+
+    #[test]
+    fn pipeline_depth_does_not_extend_a_hard_deadline() {
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
+        config.initial_depth = 2;
+        let mut driver = FrameDriver::new(config);
+        driver.request(FrameDemand::ANIMATION);
+        let FrameBeginResult::Ready(frame) = driver
+            .begin_frame(hard_deadline_opportunity(1_000, 1_090))
+            .result
+        else {
+            panic!("the frame starts at the tick");
+        };
+        assert_eq!(frame.plan().pipeline_depth, 2);
+        assert_eq!(frame.plan().commit_deadline, HostTime(1_090));
+    }
+
+    #[test]
+    fn an_opportunity_past_its_hard_deadline_expires() {
+        let mut driver = driver();
+        driver.request(FrameDemand::INPUT);
+        let FrameBeginResult::Expired(summary) = driver
+            .begin_frame(hard_deadline_opportunity(1_100, 1_090))
+            .result
+        else {
+            panic!("a frame whose resource is already due must not start");
+        };
+        assert_eq!(summary.drop_reason, Some(FrameDropReason::MissedDeadline));
+    }
+
+    #[test]
+    fn a_held_frame_takes_the_hard_deadline_of_the_tick_that_releases_it() {
+        let mut driver = driver();
+        driver.request(FrameDemand::BACKGROUND);
+        assert!(matches!(
+            driver
+                .begin_frame(hard_deadline_opportunity(1_000, 1_090))
+                .result,
+            FrameBeginResult::Wait(FrameWait::NextTick)
+        ));
+        // Planned for 1_190, but the next update's resource is due at 1_180.
+        let FrameBeginResult::Ready(frame) = driver
+            .begin_frame(hard_deadline_opportunity(1_100, 1_180))
+            .result
+        else {
+            panic!("the next tick releases the frame");
+        };
+        assert_eq!(frame.plan().commit_deadline, HostTime(1_180));
+
+        driver.request(FrameDemand::BACKGROUND);
+        let _ = driver.discard_frame(frame);
+        let _ = driver.begin_frame(hard_deadline_opportunity(1_200, 1_290));
+        // The releasing update arrives after its own deadline.
+        assert!(matches!(
+            driver
+                .begin_frame(hard_deadline_opportunity(1_300, 1_280))
+                .result,
+            FrameBeginResult::Expired(_)
+        ));
+    }
+
+    #[test]
+    fn a_tick_the_held_frame_waits_through_leaves_its_deadline_alone() {
+        let mut driver = driver();
+        // Slow frames stretch the background cadence to three refreshes.
+        for step in 0..8 {
+            let now = step * 100;
+            let frame = input_frame(&mut driver, now);
+            let _ = driver.submit_frame(frame, FrameSubmission::new(HostTime(now + 190), None));
+        }
+        driver.request(FrameDemand::BACKGROUND);
+        assert!(matches!(
+            driver
+                .begin_frame(hard_deadline_opportunity(1_000, 1_090))
+                .result,
+            FrameBeginResult::Wait(FrameWait::NextTick)
+        ));
+        assert!(matches!(
+            driver
+                .begin_frame(hard_deadline_opportunity(1_100, 1_190))
+                .result,
+            FrameBeginResult::Wait(FrameWait::NextTick)
+        ));
+        let FrameBeginResult::Ready(frame) = driver
+            .begin_frame(hard_deadline_opportunity(1_200, 1_290))
+            .result
+        else {
+            panic!("the third tick releases the frame");
+        };
+        assert_eq!(frame.plan().frame_interval, Duration(300));
+        assert_eq!(frame.plan().commit_deadline, HostTime(1_290));
+    }
+
+    #[test]
+    fn a_held_frame_released_after_a_skipped_tick_takes_its_releasing_deadline() {
+        let mut driver = driver();
+        driver.request(FrameDemand::BACKGROUND);
+        assert!(matches!(
+            driver
+                .begin_frame(hard_deadline_opportunity(1_000, 1_090))
+                .result,
+            FrameBeginResult::Wait(FrameWait::NextTick)
+        ));
+        // The tick at 1_100 never comes; the plan's 1_190 has passed by the
+        // next one, but that tick's resource is due at 1_290.
+        let FrameBeginResult::Ready(frame) = driver
+            .begin_frame(hard_deadline_opportunity(1_200, 1_290))
+            .result
+        else {
+            panic!("the next tick's resource still has time");
+        };
+        assert_eq!(frame.plan().commit_deadline, HostTime(1_290));
     }
 
     #[test]

@@ -433,7 +433,13 @@ impl Scheduler {
             source_interval,
             build_cost,
         );
-        let schedule_delta = self.schedule_delta(demand, frame_interval, source_interval);
+        // A hard deadline belongs to a resource that pipeline depth cannot
+        // give more time, so only the cadence moves it.
+        let schedule_delta = if hints.has_hard_deadline() {
+            frame_interval.saturating_sub(source_interval)
+        } else {
+            self.schedule_delta(demand, frame_interval, source_interval)
+        };
         let presentation_timing = hints.presentation_timing();
         let platform_present = if presentation_timing.has_target_present() {
             hints
@@ -448,7 +454,11 @@ impl Scheduler {
             .checked_add(schedule_delta)
             .unwrap_or(base_present);
         let present_latency = self.present_latency_shift(source_interval);
-        let base_commit_deadline = hints.latest_commit().max(tick.now);
+        let base_commit_deadline = if hints.has_hard_deadline() {
+            hints.latest_commit()
+        } else {
+            hints.latest_commit().max(tick.now)
+        };
         let commit_deadline = base_commit_deadline
             .checked_add(schedule_delta)
             .unwrap_or(base_commit_deadline);
