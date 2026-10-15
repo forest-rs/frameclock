@@ -43,15 +43,10 @@ display timing. The default fallback is
 `DEFAULT_REFRESH_INTERVAL`, a 60 Hz interval in microsecond ticks.
 
 ```rust,ignore
-use frameclock::{
-    FrameBeginResult, FrameDemand, FrameDriver, FrameSubmission, OutputId,
-    SchedulerConfig,
-};
+use frameclock::{FrameBeginResult, FrameDemand, FrameDriver, FrameSubmission, OutputId};
 use frameclock_web::{DEFAULT_REFRESH_INTERVAL, RafLoop};
 
-let mut driver = FrameDriver::new(SchedulerConfig::pacing_only(
-    frameclock_web::TIMEBASE,
-));
+let mut driver = FrameDriver::new(frameclock_web::scheduler_config());
 
 let raf = RafLoop::new(
     move |tick| {
@@ -91,6 +86,7 @@ The root module exposes the browser integration surface:
 
 - `RafLoop` for `requestAnimationFrame` callbacks.
 - `now` and `timebase` for browser host-time conversion.
+- `scheduler_config` for the `SchedulerConfig` that matches these ticks.
 - `present_hints`, `display_timing`, and `frame_opportunity`, plus
   `_with_commit_lead` variants, for hosts that own `FrameDriver` directly.
 - `DEFAULT_REFRESH_INTERVAL` for conservative pacing fallback.
@@ -119,6 +115,12 @@ during the callback, so the hints start each frame at the tick and
 `WaitUntil`. Hosts that can get richer browser timing from media APIs, such as
 video frame callbacks, should build their own `FrameOpportunity` or use a
 future media-specific adapter instead of forcing that data through plain RAF.
+
+## Submitting Frames
+
+RAF says nothing about when a frame reached the screen, so submit with
+`FrameSubmission::new(submitted_at, None)`, as above. The `frameclock`
+README's "Submitting Frames" table summarizes the choice.
 
 ## Feature Flags
 
