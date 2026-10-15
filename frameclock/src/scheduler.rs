@@ -420,7 +420,11 @@ impl Scheduler {
         FramePlan {
             demand,
             frame_interval,
-            frame_start: self.frame_start(tick.now, commit_deadline, demand),
+            frame_start: if hints.starts_at_tick() {
+                tick.now
+            } else {
+                self.frame_start(tick.now, commit_deadline, demand)
+            },
             sample_time,
             target_present,
             presentation_timing,
@@ -1019,6 +1023,22 @@ mod tests {
         );
 
         assert_eq!(plan.frame_start, HostTime(1_500));
+    }
+
+    #[test]
+    fn hints_starting_at_tick_start_the_frame_at_the_tick() {
+        let mut config = SchedulerConfig::pacing_only(Timebase::NANOS);
+        config.minimum_frame_start_margin = Duration(250);
+        let mut sched = Scheduler::new(config);
+        let mut opportunity = make_opportunity(PresentationTiming::PacingOnly, 1_000, None, 9_000);
+
+        let plan = sched.plan(opportunity, FrameDemand::ANIMATION, 0);
+        assert_eq!(plan.frame_start, HostTime(8_750));
+
+        opportunity.hints = opportunity.hints.starting_at_tick();
+        let plan = sched.plan(opportunity, FrameDemand::ANIMATION, 1);
+        assert_eq!(plan.frame_start, HostTime(1_000));
+        assert_eq!(plan.commit_deadline, HostTime(9_000));
     }
 
     #[test]

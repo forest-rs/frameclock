@@ -387,7 +387,9 @@ pub struct FramePlan {
     ///
     /// This is derived from the commit deadline and scheduler safety margin.
     /// It is clamped to the originating tick time, so callers can request
-    /// redraw immediately when this time is already due.
+    /// redraw immediately when this time is already due. Input frames, and
+    /// frames whose hints [start at the tick](PresentHints::starting_at_tick),
+    /// start at the tick time.
     pub frame_start: HostTime,
     /// Time applications should sample animation and simulation state for.
     pub sample_time: HostTime,
@@ -434,6 +436,8 @@ pub struct PresentHints {
     desired_present: Option<HostTime>,
     /// Latest time by which a commit must occur to hit the desired present.
     latest_commit: HostTime,
+    /// Whether frame work must start at the tick that offered it.
+    starts_at_tick: bool,
 }
 
 impl PresentHints {
@@ -458,6 +462,7 @@ impl PresentHints {
             presentation_timing,
             desired_present,
             latest_commit,
+            starts_at_tick: false,
         }
     }
 
@@ -480,6 +485,29 @@ impl PresentHints {
     #[must_use]
     pub const fn latest_commit(self) -> HostTime {
         self.latest_commit
+    }
+
+    /// Returns these hints with frame work required to start at the tick
+    /// that offered them.
+    ///
+    /// Use this when the platform shows only what is drawn during its frame
+    /// callback, as a browser does with `requestAnimationFrame`. The
+    /// scheduler then plans [`FramePlan::frame_start`] at the tick, instead of
+    /// as late as the commit deadline and its margins allow, which would ask
+    /// the host to wait past the callback.
+    #[inline]
+    #[must_use]
+    pub const fn starting_at_tick(mut self) -> Self {
+        self.starts_at_tick = true;
+        self
+    }
+
+    /// Returns whether frame work must start at the tick that offered these
+    /// hints. See [`starting_at_tick`](Self::starting_at_tick).
+    #[inline]
+    #[must_use]
+    pub const fn starts_at_tick(self) -> bool {
+        self.starts_at_tick
     }
 
     /// Creates predictive present hints.
