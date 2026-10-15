@@ -124,13 +124,30 @@ impl MediaTimeline {
     /// This is intended for known playback-rate commands, not drift learning.
     /// Media time stays continuous at `host`, as described by
     /// [`AffineClock::set_rate`]. Non-finite rates are ignored.
+    ///
+    /// Drift learned against the host clock carries over: it belongs to the
+    /// two clocks, not to the playback rate. If the media clock has been
+    /// running 0.1% fast, `2.0` plays at twice that learned rate.
     pub fn set_playback_rate(&mut self, host: HostTime, playback_rate: f64) {
         if !playback_rate.is_finite() {
             return;
         }
+        let drift = self.learned_drift();
         self.playback_rate = playback_rate;
         self.clock
-            .set_rate(host, self.seconds_per_host_tick * playback_rate);
+            .set_rate(host, self.seconds_per_host_tick * playback_rate * drift);
+    }
+
+    /// The learned rate as a multiple of the commanded one: the media
+    /// clock's drift against the host clock, or `1.0` when the commanded
+    /// rate gives nothing to compare with.
+    fn learned_drift(&self) -> f64 {
+        let drift = self.clock.rate() / (self.seconds_per_host_tick * self.playback_rate);
+        if drift.is_finite() && drift > 0.0 {
+            drift
+        } else {
+            1.0
+        }
     }
 
     /// Returns whether the timeline is currently paused.
@@ -217,10 +234,14 @@ impl MediaTimeline {
         &self.clock
     }
 
-    /// Resets accumulated observations while preserving the current commanded
-    /// playback rate.
+    /// Resets accumulated observations, including learned drift, while
+    /// preserving the current commanded playback rate.
     pub fn reset(&mut self) {
         self.clock.reset();
+        // The clock's baseline rate includes the drift carried into the last
+        // rate command.
+        self.clock
+            .set_rate(HostTime(0), self.seconds_per_host_tick * self.playback_rate);
         self.paused = false;
         self.paused_media_time = 0.0;
     }
@@ -315,6 +336,50 @@ mod tests {
         timeline.observe(host(1_000_010_000), 1.000_1);
 
         assert_eq!(timeline.effective_rate(), 1e-9);
+    }
+
+    /// A timeline whose media clock runs 0.1% fast against the host, fed
+    /// once per 100 ms for ten seconds.
+    fn timeline_with_drift() -> MediaTimeline {
+        let mut timeline = MediaTimeline::new(1e-9);
+        for i in 0..=100_u64 {
+            let at = i * 100_000_000;
+            timeline.observe(host(at), at as f64 * 1.001e-9);
+        }
+        timeline
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            ((actual - expected) / expected).abs() < 1e-9,
+            "expected {expected:e}, got {actual:e}"
+        );
+    }
+
+    #[test]
+    fn playback_rate_changes_keep_learned_drift() {
+        let mut timeline = timeline_with_drift();
+        let learned = timeline.effective_rate();
+        assert!(
+            (learned - 1.001e-9).abs() < 1e-14,
+            "precondition: learned {learned:e}"
+        );
+
+        timeline.set_playback_rate(host(10_000_000_000), 2.0);
+        assert_close(timeline.effective_rate(), 2.0 * learned);
+
+        timeline.set_playback_rate(host(11_000_000_000), 0.5);
+        assert_close(timeline.effective_rate(), 0.5 * learned);
+    }
+
+    #[test]
+    fn reset_drops_learned_drift() {
+        let mut timeline = timeline_with_drift();
+        timeline.set_playback_rate(host(10_000_000_000), 2.0);
+
+        timeline.reset();
+
+        assert_eq!(timeline.effective_rate(), 2e-9);
     }
 
     #[test]
