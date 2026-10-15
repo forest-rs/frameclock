@@ -47,7 +47,7 @@ use frameclock::time::Timebase;
 use frameclock::timing::{PresentationTiming, default_commit_lead};
 use frameclock::{
     ActiveFrame, DisplayTiming, Duration, FrameOpportunity, FrameSubmission, FrameTick, HostTime,
-    PresentHints, SchedulerConfig,
+    PresentHints, PresentOutcome, SchedulerConfig,
 };
 
 /// Returns the current host time using Mach absolute time.
@@ -141,6 +141,21 @@ pub fn media_time_to_host_time(media_seconds: f64) -> Option<HostTime> {
     mach_time::media_time_to_host_time(media_seconds, host_now, media_now, mach_time::timebase())
 }
 
+/// Converts a Metal drawable's `presentedTime` into a [`PresentOutcome`].
+///
+/// Read it in the drawable's presented handler. Metal reports `0.0` when the
+/// drawable was not presented or its frame was dropped, which is
+/// [`PresentOutcome::NotPresented`]; any other time is when it reached the
+/// screen, converted as by [`media_time_to_host_time`].
+#[must_use]
+pub fn presented_outcome(presented_time: f64) -> PresentOutcome {
+    if presented_time == 0.0 {
+        return PresentOutcome::NotPresented;
+    }
+    media_time_to_host_time(presented_time)
+        .map_or(PresentOutcome::Unknown, PresentOutcome::Presented)
+}
+
 /// Returns display timing for an Apple display-link tick and target output.
 ///
 /// Pass a variable [`DisplayTiming`] when the current output is known to be a
@@ -210,6 +225,13 @@ pub enum AppleFeedbackMode {
     /// Submitted frames complete immediately using commit timing as weaker
     /// pacing evidence.
     CommitOnly,
+    /// Each frame's fate arrives later, from its own drawable.
+    ///
+    /// This is the path for a Metal renderer: submit with
+    /// [`FrameSubmission::reported`] and report the drawable's presented
+    /// time, converted by [`presented_outcome`], through
+    /// [`frameclock::FrameDriver::report_frame`].
+    Reported,
 }
 
 impl AppleFeedbackMode {
@@ -219,6 +241,7 @@ impl AppleFeedbackMode {
         match self {
             Self::DeferredActualPresent => FrameSubmission::deferred(submitted_at),
             Self::CommitOnly => FrameSubmission::new(submitted_at, None),
+            Self::Reported => FrameSubmission::reported(submitted_at),
         }
     }
 }
@@ -300,6 +323,24 @@ fn fps_for_interval(interval: Duration, timebase: Timebase) -> Option<f32> {
 mod tests {
     use super::*;
     use frameclock::{FrameBeginResult, FrameDemand, FrameDriver, OutputId};
+
+    #[test]
+    fn presented_outcome_reads_zero_as_not_presented() {
+        assert_eq!(presented_outcome(0.0), PresentOutcome::NotPresented);
+        assert_eq!(presented_outcome(f64::NAN), PresentOutcome::Unknown);
+        assert!(matches!(
+            presented_outcome(objc2_quartz_core::CACurrentMediaTime()),
+            PresentOutcome::Presented(_)
+        ));
+    }
+
+    #[test]
+    fn reported_feedback_mode_submits_reported_frames() {
+        assert_eq!(
+            AppleFeedbackMode::Reported.submission(HostTime(5)),
+            FrameSubmission::reported(HostTime(5))
+        );
+    }
 
     #[test]
     fn display_link_callbacks_are_handed_ready_frames() {

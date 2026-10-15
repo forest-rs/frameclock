@@ -108,6 +108,8 @@ The root module exposes the Apple integration surface:
   `PreferredFrameRateRange` for translating a selected frame interval into a
   Core Animation-style ProMotion cadence request.
 - `CvDisplayLinkError` with the `cv-display-link` feature on macOS.
+- `presented_outcome` for turning a Metal drawable's `presentedTime` into a
+  `PresentOutcome`.
 
 `frameclock_apple` keeps Apple FFI and thread-model details out of
 `frameclock` proper. Core scheduling policy, frame demand ordering, frame
@@ -202,8 +204,8 @@ time because this adapter does not synthesize actual-present timestamps from
 That `CADisplayLink` feedback is right for Core Animation transactions, which
 reach the screen at the next refresh. A Metal renderer's frame is shown after
 its GPU work, often several refreshes later: submit it with
-`FrameSubmission::reported` instead, and report each drawable's
-`presentedTime`, converted with `media_time_to_host_time`, through
+`AppleFeedbackMode::Reported`, which is `FrameSubmission::reported`, and report
+each drawable's `presentedTime`, converted with `presented_outcome`, through
 `FrameDriver::report_frame`. The `frameclock` README's "Submitting Frames"
 table summarizes the choice.
 
