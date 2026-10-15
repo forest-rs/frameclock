@@ -20,6 +20,7 @@
 
 use std::time::Duration as StdDuration;
 
+use frameclock::time::Timebase;
 use frameclock::{
     Duration, FrameBeginResult, FrameDemand, FrameDriver, FrameOpportunity, FrameSubmission,
     HostTime, OutputId, SchedulerConfig,
@@ -308,7 +309,7 @@ fn instant_for(started_at: Instant, deadline: TimerInstant) -> Instant {
 
 impl SurfaceFrameClock {
     fn new(output: OutputId) -> Self {
-        let mut config = SchedulerConfig::pacing_only();
+        let mut config = SchedulerConfig::pacing_only(Timebase::NANOS);
         config.initial_depth = 1;
 
         Self {

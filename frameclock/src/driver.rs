@@ -908,7 +908,7 @@ mod tests {
         PresentFeedbackEvent, SchedulerStateEvent, SubmitEvent,
     };
     use crate::output::OutputId;
-    use crate::time::Duration;
+    use crate::time::{Duration, Timebase};
     use crate::timing::{DisplayTiming, PresentFeedback, PresentationTiming};
 
     use super::*;
@@ -917,7 +917,7 @@ mod tests {
     const START_MARGIN: Duration = Duration(10);
 
     fn driver() -> FrameDriver {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.initial_depth = 1;
         config.minimum_frame_start_margin = START_MARGIN;
         FrameDriver::new(config)
@@ -1708,7 +1708,7 @@ mod tests {
 
     #[test]
     fn submit_frame_judges_feedback_against_shifted_plan() {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.initial_depth = 2;
         config.minimum_frame_start_margin = Duration::ZERO;
         let mut driver = FrameDriver::new(config);

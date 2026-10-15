@@ -57,12 +57,15 @@
 //! A minimal host loop has this shape:
 //!
 //! ```rust,ignore
+//! use frameclock::time::Timebase;
 //! use frameclock::{
 //!     Duration, FrameBeginResult, FrameDemand, FrameDriver, FrameOpportunity,
 //!     FrameSubmission, HostTime, OutputId, SchedulerConfig,
 //! };
 //!
-//! let mut driver = FrameDriver::new(SchedulerConfig::pacing_only());
+//! // Host times here are nanoseconds. Pass the platform adapter's timebase
+//! // instead, such as `frameclock_apple::timebase()`.
+//! let mut driver = FrameDriver::new(SchedulerConfig::pacing_only(Timebase::NANOS));
 //!
 //! // Input, animation, timers, or layout invalidation add demand.
 //! driver.request(FrameDemand::ANIMATION);

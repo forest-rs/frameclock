@@ -49,7 +49,9 @@ use frameclock_apple::CaDisplayLink;
 use objc2::MainThreadMarker;
 
 // The display-link callback runs on the main thread and may own the driver.
-let mut driver = FrameDriver::new(SchedulerConfig::predictive());
+let mut driver = FrameDriver::new(SchedulerConfig::predictive(
+    frameclock_apple::timebase(),
+));
 // Host times are Mach ticks, so convert nanosecond intervals first.
 let display_timing = DisplayTiming::fixed(Duration::from_nanos(
     16_666_667,

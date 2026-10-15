@@ -109,12 +109,15 @@ or target-present host time, then asks `mediaclock` which media time should be
 visible then.
 
 ```rust,ignore
+use frameclock::time::Timebase;
 use frameclock::{
     Duration, FrameBeginResult, FrameDemand, FrameDriver, FrameOpportunity,
     FrameSubmission, HostTime, OutputId, SchedulerConfig,
 };
 
-let mut driver = FrameDriver::new(SchedulerConfig::pacing_only());
+// Host times here are nanoseconds. Pass the platform adapter's timebase
+// instead, such as `frameclock_apple::timebase()`.
+let mut driver = FrameDriver::new(SchedulerConfig::pacing_only(Timebase::NANOS));
 driver.request(FrameDemand::ANIMATION);
 
 let opportunity = FrameOpportunity::pacing_only(
@@ -228,8 +231,9 @@ The split also tightens names around timing semantics:
   need retained frame scheduling state. `PlannedFrame` retains the originating
   `FrameTick`, selected `FramePlan`, and matching `PresentHints`.
 - Platform-named scheduler presets are now capability-named:
-  `SchedulerConfig::predictive()`, `SchedulerConfig::estimated()`, and
-  `SchedulerConfig::pacing_only()`.
+  `SchedulerConfig::predictive`, `SchedulerConfig::estimated`, and
+  `SchedulerConfig::pacing_only`. Each takes the host clock's `Timebase`, so
+  its default durations are the same length on every platform.
 
 ## Feature Flags
 

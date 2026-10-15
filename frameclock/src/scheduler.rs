@@ -9,7 +9,7 @@
 //! details on pipeline depth and adaptive behavior.
 
 use crate::demand::{FrameDemand, FrameDemandClass};
-use crate::time::{Duration, HostTime};
+use crate::time::{Duration, HostTime, Timebase};
 use crate::timing::{
     DisplayTiming, FrameOpportunity, FramePlan, PresentFeedback, PresentationTiming,
 };
@@ -59,14 +59,14 @@ pub struct SchedulerConfig {
     /// Safety margin multiplier applied to the EMA build cost.
     pub safety_multiplier: f64,
     /// Minimum margin subtracted from the commit deadline to compute
-    /// [`FramePlan::frame_start`].
+    /// [`FramePlan::frame_start`], in host ticks.
     ///
     /// The scheduler uses the larger of this value and the learned safety
     /// margin. This gives first-frame scheduling a conservative work window
     /// before feedback has trained the build-cost estimate.
     pub minimum_frame_start_margin: Duration,
-    /// Nominal latency (in ticks) used for pacing-only mode when no predicted
-    /// present time is available.
+    /// Nominal latency, in host ticks, used for pacing-only mode when no
+    /// predicted present time is available.
     pub nominal_latency: Duration,
     /// Policy for adapting pipeline depth.
     pub degradation_policy: DegradationPolicy,
@@ -90,19 +90,31 @@ pub struct SchedulerConfig {
     pub present_latency_alpha: f64,
 }
 
+/// The default [`SchedulerConfig::minimum_frame_start_margin`]: 1 ms.
+const DEFAULT_FRAME_START_MARGIN_NANOS: u64 = 1_000_000;
+
+/// The default pacing-only [`SchedulerConfig::nominal_latency`]: 16 ms.
+const DEFAULT_PACING_LATENCY_NANOS: u64 = 16_000_000;
+
 impl SchedulerConfig {
     /// Default configuration for predictive timing.
     ///
     /// Use this when a platform exposes a strong predicted presentation time.
+    /// `timebase` is the host clock's, such as the platform adapter's
+    /// `timebase()`. The default durations are converted to its ticks, so they
+    /// are the same length on every platform.
     #[must_use]
-    pub const fn predictive() -> Self {
+    pub const fn predictive(timebase: Timebase) -> Self {
         Self {
             initial_depth: 1,
             min_depth: 1,
             max_depth: 3,
             ema_alpha: 0.2,
             safety_multiplier: 1.5,
-            minimum_frame_start_margin: Duration(1_000_000),
+            minimum_frame_start_margin: Duration::from_nanos(
+                DEFAULT_FRAME_START_MARGIN_NANOS,
+                timebase,
+            ),
             nominal_latency: Duration(0),
             degradation_policy: DegradationPolicy::Adaptive {
                 miss_threshold: 3,
@@ -115,16 +127,20 @@ impl SchedulerConfig {
     /// Default configuration for estimated timing.
     ///
     /// Use this when a platform exposes useful but less reliable predicted
-    /// presentation timing.
+    /// presentation timing. `timebase` is interpreted as by
+    /// [`predictive`](Self::predictive).
     #[must_use]
-    pub const fn estimated() -> Self {
+    pub const fn estimated(timebase: Timebase) -> Self {
         Self {
             initial_depth: 1,
             min_depth: 1,
             max_depth: 3,
             ema_alpha: 0.2,
             safety_multiplier: 2.0,
-            minimum_frame_start_margin: Duration(1_000_000),
+            minimum_frame_start_margin: Duration::from_nanos(
+                DEFAULT_FRAME_START_MARGIN_NANOS,
+                timebase,
+            ),
             nominal_latency: Duration(0),
             degradation_policy: DegradationPolicy::Adaptive {
                 miss_threshold: 3,
@@ -137,18 +153,21 @@ impl SchedulerConfig {
     /// Default configuration for pacing-only timing.
     ///
     /// Use this when a platform exposes frame pacing but no reliable target
-    /// presentation time.
+    /// presentation time. `timebase` is interpreted as by
+    /// [`predictive`](Self::predictive).
     #[must_use]
-    pub const fn pacing_only() -> Self {
+    pub const fn pacing_only(timebase: Timebase) -> Self {
         Self {
             initial_depth: 1,
             min_depth: 1,
             max_depth: 3,
             ema_alpha: 0.15,
             safety_multiplier: 2.0,
-            minimum_frame_start_margin: Duration(1_000_000),
-            // ~16ms at 1ns tick resolution.
-            nominal_latency: Duration(16_000_000),
+            minimum_frame_start_margin: Duration::from_nanos(
+                DEFAULT_FRAME_START_MARGIN_NANOS,
+                timebase,
+            ),
+            nominal_latency: Duration::from_nanos(DEFAULT_PACING_LATENCY_NANOS, timebase),
             degradation_policy: DegradationPolicy::Adaptive {
                 miss_threshold: 3,
                 recovery_threshold: 10,
@@ -709,8 +728,31 @@ mod tests {
     }
 
     #[test]
+    fn default_durations_follow_the_host_timebase() {
+        // Mach ticks on Apple silicon: 125/3 ns each.
+        let mach = Timebase::new(125, 3);
+        for config in [
+            SchedulerConfig::predictive(mach),
+            SchedulerConfig::estimated(mach),
+            SchedulerConfig::pacing_only(mach),
+        ] {
+            assert_eq!(config.minimum_frame_start_margin, Duration(24_000));
+        }
+        assert_eq!(
+            SchedulerConfig::pacing_only(mach).nominal_latency,
+            Duration(384_000)
+        );
+
+        // Browser microsecond ticks.
+        let micros = Timebase::new(1000, 1);
+        let config = SchedulerConfig::pacing_only(micros);
+        assert_eq!(config.minimum_frame_start_margin, Duration(1_000));
+        assert_eq!(config.nominal_latency, Duration(16_000));
+    }
+
+    #[test]
     fn predictive_plan_uses_predicted_present() {
-        let config = SchedulerConfig::predictive();
+        let config = SchedulerConfig::predictive(Timebase::NANOS);
         let mut sched = Scheduler::new(config);
 
         let plan = sched.plan(
@@ -730,7 +772,7 @@ mod tests {
     #[test]
     fn a_frame_shown_late_moves_the_next_frames_target_present() {
         // Fixed depth, so only the latency compensation moves the target.
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.degradation_policy = DegradationPolicy::Fixed;
         let mut sched = Scheduler::new(config);
         let predicted = 2000;
@@ -780,7 +822,7 @@ mod tests {
 
     #[test]
     fn a_frame_committed_late_does_not_teach_present_latency() {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.degradation_policy = DegradationPolicy::Fixed;
         let mut sched = Scheduler::new(config);
         let plan = sched.plan(
@@ -809,7 +851,7 @@ mod tests {
 
     #[test]
     fn one_frame_shown_late_does_not_set_present_latency_outright() {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.degradation_policy = DegradationPolicy::Fixed;
         let mut sched = Scheduler::new(config);
         let plan = sched.plan(
@@ -839,7 +881,7 @@ mod tests {
 
     #[test]
     fn present_latency_compensation_is_off_without_actual_present_times() {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.degradation_policy = DegradationPolicy::Fixed;
         let mut sched = Scheduler::new(config);
         for _ in 0..20 {
@@ -868,7 +910,7 @@ mod tests {
 
     #[test]
     fn plan_uses_explicit_frame_index() {
-        let config = SchedulerConfig::predictive();
+        let config = SchedulerConfig::predictive(Timebase::NANOS);
         let mut sched = Scheduler::new(config);
 
         let plan = sched.plan(
@@ -882,7 +924,7 @@ mod tests {
 
     #[test]
     fn pacing_only_plan_has_no_target_present() {
-        let config = SchedulerConfig::pacing_only();
+        let config = SchedulerConfig::pacing_only(Timebase::NANOS);
         let mut sched = Scheduler::new(config);
 
         let plan = sched.plan(
@@ -899,7 +941,7 @@ mod tests {
 
     #[test]
     fn frame_start_uses_configured_start_margin() {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.minimum_frame_start_margin = Duration(250);
         let mut sched = Scheduler::new(config);
 
@@ -914,7 +956,7 @@ mod tests {
 
     #[test]
     fn frame_start_uses_learned_safety_margin_when_larger() {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.minimum_frame_start_margin = Duration(100);
         config.safety_multiplier = 2.0;
         let mut sched = Scheduler::new(config);
@@ -943,7 +985,7 @@ mod tests {
 
     #[test]
     fn scheduler_sanitizes_non_finite_float_config() {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.ema_alpha = f64::NAN;
         config.safety_multiplier = f64::INFINITY;
         let mut sched = Scheduler::new(config);
@@ -966,7 +1008,7 @@ mod tests {
 
     #[test]
     fn frame_start_clamps_to_tick_now_when_start_is_due() {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.minimum_frame_start_margin = Duration(1_000);
         let mut sched = Scheduler::new(config);
 
@@ -981,7 +1023,7 @@ mod tests {
 
     #[test]
     fn stale_predictive_present_is_ignored() {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.minimum_frame_start_margin = Duration(250);
         let mut sched = Scheduler::new(config);
         let tick = make_tick(2_000, Some(1_500));
@@ -1001,7 +1043,7 @@ mod tests {
 
     #[test]
     fn input_demand_starts_immediately() {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.minimum_frame_start_margin = Duration(250);
         let mut sched = Scheduler::new(config);
 
@@ -1018,7 +1060,7 @@ mod tests {
 
     #[test]
     fn animation_uses_stable_fixed_rate_divisor_when_work_is_slow() {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.ema_alpha = 1.0;
         config.safety_multiplier = 1.0;
         let mut sched = Scheduler::new(config);
@@ -1054,7 +1096,7 @@ mod tests {
 
     #[test]
     fn safety_multiplier_does_not_force_cadence_drop() {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.ema_alpha = 1.0;
         config.safety_multiplier = 4.0;
         config.minimum_frame_start_margin = Duration::ZERO;
@@ -1091,7 +1133,7 @@ mod tests {
 
     #[test]
     fn variable_refresh_without_granularity_uses_stable_divisor() {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.ema_alpha = 1.0;
         config.safety_multiplier = 1.0;
         let mut sched = Scheduler::new(config);
@@ -1134,7 +1176,7 @@ mod tests {
 
     #[test]
     fn variable_refresh_with_granularity_uses_direct_step() {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.ema_alpha = 1.0;
         config.safety_multiplier = 1.0;
         let mut sched = Scheduler::new(config);
@@ -1177,7 +1219,7 @@ mod tests {
 
     #[test]
     fn pipeline_depth_increases_after_misses() {
-        let config = SchedulerConfig::predictive();
+        let config = SchedulerConfig::predictive(Timebase::NANOS);
         let mut sched = Scheduler::new(config);
         assert_eq!(sched.pipeline_depth(), 1);
 
@@ -1203,7 +1245,7 @@ mod tests {
 
     #[test]
     fn pipeline_depth_shifts_non_input_plan_by_whole_intervals() {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.initial_depth = 3;
         config.minimum_frame_start_margin = Duration(250);
         let mut sched = Scheduler::new(config);
@@ -1228,7 +1270,7 @@ mod tests {
 
     #[test]
     fn pipeline_depth_does_not_shift_one_shot_input() {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.initial_depth = 3;
         config.minimum_frame_start_margin = Duration(250);
         let mut sched = Scheduler::new(config);
@@ -1248,7 +1290,7 @@ mod tests {
 
     #[test]
     fn pipeline_depth_does_not_shift_continuous_input() {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.initial_depth = 3;
         config.minimum_frame_start_margin = Duration(250);
         let mut sched = Scheduler::new(config);
@@ -1268,7 +1310,7 @@ mod tests {
 
     #[test]
     fn consecutive_miss_counter_resets_on_success() {
-        let config = SchedulerConfig::predictive();
+        let config = SchedulerConfig::predictive(Timebase::NANOS);
         let mut sched = Scheduler::new(config);
 
         let miss = PresentFeedback {
@@ -1298,7 +1340,7 @@ mod tests {
 
     #[test]
     fn pipeline_depth_decreases_after_sustained_hits() {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.initial_depth = 3;
         let mut sched = Scheduler::new(config);
         assert_eq!(sched.pipeline_depth(), 3);
@@ -1325,7 +1367,7 @@ mod tests {
 
     #[test]
     fn fixed_policy_never_changes_depth() {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.degradation_policy = DegradationPolicy::Fixed;
         config.initial_depth = 2;
         let mut sched = Scheduler::new(config);
@@ -1354,7 +1396,7 @@ mod tests {
 
     #[test]
     fn custom_miss_threshold() {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.degradation_policy = DegradationPolicy::Adaptive {
             miss_threshold: 5,
             recovery_threshold: 10,
@@ -1383,7 +1425,7 @@ mod tests {
 
     #[test]
     fn recovery_respects_min_depth() {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.initial_depth = 2;
         config.degradation_policy = DegradationPolicy::Adaptive {
             miss_threshold: 3,
@@ -1417,7 +1459,7 @@ mod tests {
 
     #[test]
     fn estimated_presentation_timing_uses_desired_present() {
-        let config = SchedulerConfig::predictive();
+        let config = SchedulerConfig::predictive(Timebase::NANOS);
         let mut sched = Scheduler::new(config);
 
         let plan = sched.plan(
@@ -1434,7 +1476,7 @@ mod tests {
 
     #[test]
     fn observe_with_unknown_deadline_resets_counters() {
-        let config = SchedulerConfig::predictive();
+        let config = SchedulerConfig::predictive(Timebase::NANOS);
         let mut sched = Scheduler::new(config);
 
         let miss = PresentFeedback {
@@ -1471,7 +1513,7 @@ mod tests {
 
     #[test]
     fn pacing_only_unknown_feedback_does_not_raise_depth() {
-        let config = SchedulerConfig::pacing_only();
+        let config = SchedulerConfig::pacing_only(Timebase::NANOS);
         let mut sched = Scheduler::new(config);
 
         let unknown = PresentFeedback {
@@ -1499,7 +1541,7 @@ mod tests {
 
     #[test]
     fn depth_clamped_at_max() {
-        let mut config = SchedulerConfig::predictive();
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.max_depth = 3;
         config.degradation_policy = DegradationPolicy::Adaptive {
             miss_threshold: 1,
@@ -1529,7 +1571,7 @@ mod tests {
 
     #[test]
     fn build_cost_ema_updates() {
-        let config = SchedulerConfig::predictive();
+        let config = SchedulerConfig::predictive(Timebase::NANOS);
         let mut sched = Scheduler::new(config);
         assert_eq!(sched.safety_margin_ticks(), 0);
 
@@ -1554,7 +1596,7 @@ mod tests {
 
     #[test]
     fn pacing_overrun_raises_depth_more_conservatively() {
-        let config = SchedulerConfig::pacing_only();
+        let config = SchedulerConfig::pacing_only(Timebase::NANOS);
         let mut sched = Scheduler::new(config);
 
         let overrun = PresentFeedback {
@@ -1580,7 +1622,7 @@ mod tests {
 
     #[test]
     fn pacing_overrun_counters_reset_on_clear_tick() {
-        let config = SchedulerConfig::pacing_only();
+        let config = SchedulerConfig::pacing_only(Timebase::NANOS);
         let mut sched = Scheduler::new(config);
 
         let overrun = PresentFeedback {

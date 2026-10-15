@@ -293,7 +293,7 @@ mod tests {
             FrameSubmission, SchedulerConfig,
         };
 
-        let mut driver = FrameDriver::new(SchedulerConfig::pacing_only());
+        let mut driver = FrameDriver::new(SchedulerConfig::pacing_only(crate::timebase()));
         driver.request(FrameDemand::INPUT);
         let begin = driver.begin_frame(FrameOpportunity::pacing_only(
             HostTime(1_000_000_000),
