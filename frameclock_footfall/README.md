@@ -75,7 +75,7 @@ This crate uses Footfall 0.1.
 
 ## Minimum Supported Rust Version (MSRV)
 
-This crate has been verified to compile with **Rust 1.92** and later.
+This crate has been verified to compile with **Rust 1.88** and later.
 
 ## License
 

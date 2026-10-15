@@ -167,7 +167,7 @@ targets instead of the workspace's generic `x86_64-unknown-none` no-std target.
 
 ## Minimum Supported Rust Version (MSRV)
 
-This crate has been verified to compile with **Rust 1.92** and later.
+This crate has been verified to compile with **Rust 1.88** and later.
 
 ## License
 

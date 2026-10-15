@@ -238,7 +238,7 @@ The split also tightens names around timing semantics:
 
 ## Minimum Supported Rust Version
 
-This crate has been verified to compile with **Rust 1.92** and later.
+This crate has been verified to compile with **Rust 1.88** and later.
 
 ## License
 

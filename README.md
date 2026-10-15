@@ -18,7 +18,7 @@ applications own their event loops, rendering, and presentation surfaces.
 Run the deterministic example with `cargo run -p frameclock_simulated`, or the
 winit event-loop example with `cargo run -p winit_paced_redraw`.
 
-The minimum supported Rust version is **1.92**. CI checks feature combinations,
+The minimum supported Rust version is **1.88**. CI checks feature combinations,
 native platforms, WebAssembly, `no_std`, documentation, spelling, and formatting.
 On macOS, run:
 
