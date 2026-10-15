@@ -122,6 +122,12 @@ pub fn present_hints(tick: &FrameTick, fallback_refresh_interval: Duration) -> P
 /// pacing-only timing aimed one refresh after the tick, as described by
 /// [`PresentHints::for_tick`]. The scheduler applies its own learned build
 /// margin later.
+///
+/// The hints [start each frame at a tick](PresentHints::starting_at_tick),
+/// so a host that renders when a frame callback arrives is handed ready frames
+/// there. A host with its own timer can mark them
+/// [`starting_when_planned`](PresentHints::starting_when_planned) to start
+/// frames nearer their deadline.
 #[must_use]
 pub fn present_hints_with_commit_lead(
     tick: &FrameTick,
@@ -134,6 +140,7 @@ pub fn present_hints_with_commit_lead(
         fallback_refresh_interval,
         commit_lead,
     )
+    .starting_at_tick()
 }
 
 /// Returns display timing for a Wayland [`FrameTick`] and its target output.
@@ -183,11 +190,12 @@ pub fn frame_opportunity_with_commit_lead(
 mod tests {
     use super::{
         default_display_timing, display_timing, frame_opportunity, present_hints,
-        present_hints_with_commit_lead,
+        present_hints_with_commit_lead, scheduler_config,
     };
     use frameclock::OutputId;
     use frameclock::timing::PresentationTiming;
     use frameclock::{DisplayTiming, Duration, FrameTick, HostTime};
+    use frameclock::{FrameBeginResult, FrameDemand, FrameDriver, FrameSubmission};
 
     fn tick(predicted_present: Option<HostTime>) -> FrameTick {
         FrameTick {
@@ -275,6 +283,29 @@ mod tests {
             opportunity.display_timing,
             DisplayTiming::fixed(Duration(16_666_667))
         );
+    }
+
+    #[test]
+    fn frame_callbacks_are_handed_ready_frames() {
+        let refresh = Duration(16_666_667);
+        let mut driver = FrameDriver::new(scheduler_config());
+        for i in 0..4 {
+            let now = HostTime(1_000_000_000 + i * refresh.ticks());
+            let tick = FrameTick {
+                now,
+                predicted_present: Some(HostTime(now.ticks() + refresh.ticks())),
+                refresh_interval: Some(refresh),
+                output: OutputId(0),
+                prev_actual_present: None,
+            };
+            driver.request(FrameDemand::ANIMATION);
+            let opportunity = frame_opportunity(tick, default_display_timing());
+            let FrameBeginResult::Ready(frame) = driver.begin_frame(opportunity).result else {
+                panic!("tick {i} must be handed a ready frame");
+            };
+            let _ = driver.submit_frame(frame, FrameSubmission::new(now, None));
+        }
+        assert!(!driver.needs_tick());
     }
 
     #[test]
