@@ -27,6 +27,61 @@ platform tick -> FrameOpportunity
               -> FrameTimingSummary
 ```
 
+## A Host Loop
+
+Start from your platform's adapter: `frameclock_apple`, `frameclock_windows`,
+`frameclock_wayland`, `frameclock_x11`, or `frameclock_web`. Each turns its
+platform's frame callbacks into `FrameTick`s and offers the same functions, so
+host code can pick one with `cfg` and stay the same everywhere:
+
+```rust,ignore
+#[cfg(target_vendor = "apple")]
+use frameclock_apple as platform;
+#[cfg(target_arch = "wasm32")]
+use frameclock_web as platform;
+// ...and likewise for Windows, Wayland, or X11.
+
+use frameclock::{FrameBeginResult, FrameDemand, FrameDriver, FrameSubmission};
+
+let mut driver = FrameDriver::new(platform::scheduler_config());
+let display_timing = platform::default_display_timing();
+
+// When something on screen changes:
+driver.request(FrameDemand::ANIMATION);
+
+// In each frame callback, with the adapter's `FrameTick`:
+let opportunity = platform::frame_opportunity(tick, display_timing);
+match driver.begin_frame(opportunity).result {
+    FrameBeginResult::Ready(frame) => {
+        // Update and render for frame.sample_time(), then:
+        let _ = driver.submit_frame(frame, FrameSubmission::new(platform::now(), None));
+    }
+    // The cadence starts this frame at a later callback.
+    FrameBeginResult::WaitUntil(_) => {}
+    FrameBeginResult::Expired(_) | FrameBeginResult::Idle => {}
+}
+// Keep the callbacks coming while `driver.needs_tick()`.
+```
+
+Each adapter's README shows the full loop for its platform, including which
+`FrameSubmission` fits its presentation evidence.
+
+Every `HostTime` and `Duration` is in the adapter's host ticks: nanoseconds on
+Linux, Mach ticks on Apple, QPC ticks on Windows, and microseconds on the web.
+Write a duration from nanoseconds with
+`Duration::from_nanos(nanos, platform::timebase())`. Debug builds panic on
+display timing slower than 4 Hz, which is what a nanosecond value passed as
+ticks usually looks like.
+
+The adapters' opportunities start each frame at a tick, so a host that renders
+from its frame callback never has to wake itself. A frame the cadence holds
+back returns `WaitUntil` and starts at the later callback it waits for. A host
+with its own timer can start frames later instead, nearer their deadline, so
+they sample fresher input: mark the hints `starting_when_planned`, wake at the
+time `WaitUntil` returns, and call `FrameDriver::begin_pending_frame`.
+
+## Concepts
+
 Use `FrameDemand` as the host-owned reason a frame is needed. Request
 `INPUT` for discrete user action, `CONTINUOUS_INPUT` while scrolling/resizing or
 dragging, `ANIMATION` while a visual timeline is active, and `BACKGROUND` for
@@ -108,6 +163,9 @@ Media timeline mapping for video PTS or audio-master clocks lives in the
 or target-present host time, then asks `mediaclock` which media time should be
 visible then.
 
+Without a platform adapter, such as in a test, a simulation, or a custom
+backend, build the `FrameOpportunity` directly:
+
 ```rust,ignore
 use frameclock::time::Timebase;
 use frameclock::{
@@ -145,7 +203,7 @@ match begin.result {
         _ = (sample_time, submit.summary);
     }
     FrameBeginResult::WaitUntil(frame_start) => {
-        // Mirror frame_start into the host timer queue.
+        // Wake at frame_start, then call `begin_pending_frame`.
         _ = frame_start;
     }
     FrameBeginResult::Expired(summary) => {

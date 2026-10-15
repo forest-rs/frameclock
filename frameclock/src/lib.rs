@@ -14,6 +14,12 @@
 //! renderers, swapchains, or native presentation resources. Those belong in
 //! platform adapters and higher-level engines.
 //!
+//! Most hosts start from a platform adapter crate, such as `frameclock_apple`
+//! or `frameclock_web`, whose `scheduler_config`, `default_display_timing`,
+//! and `frame_opportunity` build these inputs for its platform. Every
+//! [`HostTime`] and [`Duration`] is in that platform's host ticks, not
+//! nanoseconds; see [`Duration::from_nanos`].
+//!
 //! # API Surfaces
 //!
 //! The root module re-exports the common retained-host integration surface:
@@ -98,7 +104,7 @@
 //!         _ = submit.summary;
 //!     }
 //!     FrameBeginResult::WaitUntil(frame_start) => {
-//!         // Mirror `frame_start` into the host timer queue and wait.
+//!         // Wake at `frame_start`, then call `begin_pending_frame`.
 //!         _ = frame_start;
 //!     }
 //!     FrameBeginResult::Expired(summary) => {
