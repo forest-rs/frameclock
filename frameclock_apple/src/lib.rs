@@ -30,6 +30,7 @@
 extern crate alloc;
 
 mod mach_time;
+mod wake;
 
 #[cfg(feature = "ca-display-link")]
 mod ca_display_link;
@@ -40,6 +41,7 @@ mod cv_display_link;
 pub use ca_display_link::CaDisplayLink;
 #[cfg(all(feature = "cv-display-link", target_os = "macos"))]
 pub use cv_display_link::{CvDisplayLink, CvDisplayLinkError};
+pub use wake::wake_at;
 
 use frameclock::time::Timebase;
 use frameclock::timing::{PresentationTiming, default_commit_lead};
