@@ -40,6 +40,8 @@ acquire native presentation resources, and how to submit to Core Animation or
 Metal.
 
 ```rust,ignore
+use core::cell::RefCell;
+
 use frameclock::{
     DisplayTiming, Duration, FrameBeginResult, FrameDemand, FrameDriver,
     OutputId, SchedulerConfig,
@@ -47,13 +49,20 @@ use frameclock::{
 use frameclock_apple::DisplayLink;
 use objc2::MainThreadMarker;
 
-let mut driver = FrameDriver::new(SchedulerConfig::predictive());
-let display_timing = DisplayTiming::fixed(Duration(16_666_667));
+// The display-link callback is a shared `Fn`, so it borrows the driver
+// mutably through a `RefCell`.
+let driver = RefCell::new(FrameDriver::new(SchedulerConfig::predictive()));
+// Host times are Mach ticks, so convert nanosecond intervals first.
+let display_timing = DisplayTiming::fixed(Duration::from_nanos(
+    16_666_667,
+    frameclock_apple::timebase(),
+));
 let output = OutputId(0);
 let mtm = MainThreadMarker::new().unwrap();
 
 let display_link = DisplayLink::new(
     move |tick| {
+        let mut driver = driver.borrow_mut();
         driver.request(FrameDemand::ANIMATION);
 
         let opportunity = frameclock_apple::frame_opportunity(tick, display_timing);
@@ -120,8 +129,14 @@ tracing, or external diagnostics.
 
 `CADisplayLink` ticks carry `targetTimestamp` as `predicted_present`,
 `duration` as `refresh_interval`, and the previous callback's `timestamp` as
-`prev_actual_present` after the first tick. `CVDisplayLink` ticks carry the
-output host time as `predicted_present`.
+`prev_actual_present`, except on the first tick after the link is created,
+paused, or stopped. `CVDisplayLink` ticks carry the output host time as
+`predicted_present` and the display's refresh period as `refresh_interval`.
+
+Every `Duration` and `DisplayTiming` passed alongside these ticks is in Mach
+ticks too. Convert nanosecond values with `Duration::from_nanos(nanos,
+frameclock_apple::timebase())`; on Apple silicon one Mach tick is about 41.7
+ns, so a raw `Duration(16_666_667)` would mean about 694 ms.
 
 `frame_opportunity` computes predictive `PresentHints` from the display-link
 prediction when it is fresh. The adapter subtracts a small platform commit lead
