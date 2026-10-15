@@ -11,7 +11,9 @@
 //! ```
 //!
 //! Rate and epoch media are updated smoothly (via EMA) each time a new
-//! observation is fed in, avoiding jitter while tracking drift.
+//! observation is fed in, avoiding jitter while tracking drift. Each update
+//! moves the epoch to the observation, so a learned rate change bends the
+//! mapping from that point on rather than rotating it about an old epoch.
 //!
 //! This module is a helper for hosts that need to map frameclock host times into
 //! an external timeline, such as video PTS or an audio-master media clock. A
@@ -174,6 +176,11 @@ impl AffineClock {
             return AffineClockUpdate::Ignored;
         }
 
+        // What the mapping predicted for this observation, before learning
+        // from it.
+        let predicted_media = self.media_time_at_initialized(host_ticks);
+        let offset_error = media_time - predicted_media;
+
         // Estimate instantaneous rate from this pair of observations.
         let dt_media = media_time - self.last_media;
         let observed_rate = dt_media / dt_host as f64;
@@ -181,12 +188,12 @@ impl AffineClock {
         // Smooth rate.
         self.rate = self.rate_alpha * observed_rate + (1.0 - self.rate_alpha) * self.rate;
 
-        // Correct the epoch media value from the current rate.
-        let predicted_media = self.media_time_at_initialized(host_ticks);
-        let offset_error = media_time - predicted_media;
-
-        // Smooth offset correction.
-        self.epoch_media += self.offset_alpha * offset_error;
+        // Move the epoch to this observation with a smoothed offset
+        // correction, so the new rate pivots here. Pivoting at an older
+        // epoch would turn every small rate change into an offset error
+        // that grows with the time since that epoch.
+        self.epoch_host = host_ticks;
+        self.epoch_media = predicted_media + self.offset_alpha * offset_error;
 
         self.last_host = host_ticks;
         self.last_media = media_time;
@@ -382,6 +389,38 @@ mod tests {
 
         assert!((clock.media_time_at(host(1_000_000_000)).unwrap() - 1.0).abs() < 1e-12);
         assert!((clock.media_time_at(host(2_000_000_000)).unwrap() - 3.0).abs() < 1e-12);
+    }
+
+    /// A deterministic jitter source in `-1.0..1.0`.
+    struct Jitter(u64);
+
+    impl Jitter {
+        fn next(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 11) as f64 / (1_u64 << 52) as f64 - 1.0
+        }
+    }
+
+    #[test]
+    fn jittered_observations_keep_the_error_bounded_over_long_runs() {
+        const FRAME: u64 = 16_666_667;
+        let mut clock = AffineClock::new(1e-9, 0.1, 0.1);
+        let mut jitter = Jitter(1);
+        let mut worst = 0.0_f64;
+        // Ten minutes of 60 Hz observations, each up to 1 ms off.
+        for i in 0..36_000_u64 {
+            let at = i * FRAME;
+            let truth = at as f64 * 1e-9;
+            if i > 600 {
+                let error = (clock.media_time_at(host(at)).unwrap() - truth).abs();
+                worst = worst.max(error);
+            }
+            clock.update(host(at), truth + 1e-3 * jitter.next());
+        }
+        assert!(worst < 0.005, "worst error {worst} s");
     }
 
     #[test]
