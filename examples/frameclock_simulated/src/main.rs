@@ -7,6 +7,10 @@
 //! layer tree. It demonstrates the core loop: build a tick, plan the frame,
 //! emit diagnostics, submit synthetic work, and feed presentation feedback back
 //! into the scheduler.
+//!
+//! The simulated display refreshes every [`REFRESH_INTERVAL`] and shows a frame
+//! at the first refresh, at or after the frame's target, whose commit deadline
+//! the frame met. Every 23rd frame builds for most of a refresh and misses.
 
 use frameclock::diagnostics::{
     Diagnostics, DiagnosticsSink, FramePlanEvent, FrameTickEvent, FrameTimingSummaryBuilder,
@@ -78,6 +82,7 @@ fn main() {
     {
         let mut diagnostics = Diagnostics::new(&mut sink);
         let output = OutputId(0);
+        let mut prev_actual_present = None;
 
         for frame_index in 0..FRAME_COUNT {
             let mut summary = FrameTimingSummaryBuilder::new();
@@ -88,7 +93,7 @@ fn main() {
                 predicted_present: Some(predicted_present),
                 refresh_interval: Some(REFRESH_INTERVAL),
                 output,
-                prev_actual_present: if frame_index > 0 { Some(now) } else { None },
+                prev_actual_present,
             };
             let tick_event = FrameTickEvent::new(frame_index, &tick);
             summary.record_frame_tick(&tick_event);
@@ -118,7 +123,13 @@ fn main() {
                 Duration(850_000)
             };
             let submitted_at = build_start + build_cost;
-            let feedback = PresentFeedback::new(&plan, build_start, submitted_at, None);
+            let actual_present = shown_at(
+                plan.target_present.unwrap_or(predicted_present),
+                submitted_at,
+            );
+            prev_actual_present = Some(actual_present);
+            let feedback =
+                PresentFeedback::new(&plan, build_start, submitted_at, Some(actual_present));
 
             let submit_event = SubmitEvent {
                 frame_index,
@@ -155,4 +166,15 @@ fn main() {
     println!("pacing overruns: {}", sink.overruns);
     println!("final pipeline depth: {}", sink.final_depth);
     println!("final safety margin ticks: {}", sink.final_safety_margin);
+}
+
+/// When the simulated display shows a frame aimed at `target` and submitted
+/// at `submitted_at`: the first refresh at or after `target` that is at least
+/// [`SAFETY_MARGIN`] after the submission.
+fn shown_at(target: HostTime, submitted_at: HostTime) -> HostTime {
+    let mut refresh = target;
+    while submitted_at + SAFETY_MARGIN > refresh {
+        refresh = refresh + REFRESH_INTERVAL;
+    }
+    refresh
 }
