@@ -77,8 +77,10 @@ use frameclock::timing::PresentationTiming;
 use frameclock::{ActiveFrame, FrameTimingSummary, HostTime};
 
 /// The clock frameclock's [`HostTime`] values are read from: Mach absolute
-/// time on Apple platforms, `QueryPerformanceCounter` on Windows,
-/// `CLOCK_MONOTONIC` on Linux, `performance.now()` on the web.
+/// time on Apple platforms, `QueryPerformanceCounter` on Windows, the clock
+/// the Wayland or X11 adapter selected on Linux (usually `CLOCK_MONOTONIC`),
+/// and `performance.now()` on the web. Feed [`Recorder::sync`] from that same
+/// clock.
 ///
 /// Every frame point a [`Recorder`] emits is a reading of this clock. Use it
 /// for other host-clock readings too, such as the host half of a GPU
