@@ -73,9 +73,8 @@ let display_link = CaDisplayLink::new(
                 );
                 _ = (sample_time, submit.awaiting_actual_present);
             }
-            FrameBeginResult::Wait(wait) => {
-                // Mirror the wait into the host's timer/redraw machinery.
-                _ = wait;
+            FrameBeginResult::Wait(_) => {
+                // The cadence starts this frame at a later tick.
             }
             FrameBeginResult::Expired(summary) => {
                 // Record the dropped-frame summary and request fresh demand if needed.
@@ -142,6 +141,16 @@ estimate. If a display-link callback arrives after its predicted present time,
 the stale prediction is ignored and the frame is planned with pacing-only hints
 from the callback time. Scheduler safety margin remains inside `frameclock`
 planning; it is not baked into Apple platform hints.
+
+The hints start each frame at a display-link tick, so the callback is handed
+ready frames and never has to wake itself. A frame the cadence holds back, such
+as background work every other refresh, returns `Wait(FrameWait::NextTick)` and
+is ready at the later tick it waits for. A host with its own timer can start
+frames nearer their deadline, so they sample fresher input: mark the
+opportunity's hints `starting_when_planned`, wake at the time
+`Wait(FrameWait::Until(time))` gives, and call
+`FrameDriver::begin_pending_frame`. Pause the display link while
+`FrameDriver::needs_tick` is false.
 
 Presentation feedback lifecycle is host-owned, while feedback capability comes
 from the Apple display-link source. Use the source's `FEEDBACK_MODE`, such as
