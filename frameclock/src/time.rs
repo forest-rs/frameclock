@@ -16,9 +16,9 @@
 //! [`Duration`] represents a duration in the same tick units as [`HostTime`].
 //! Every time value passed through one [`FrameDriver`](crate::FrameDriver) or
 //! [`Scheduler`](crate::scheduler::Scheduler) should use the same clock domain
-//! and timebase. Conversion arithmetic uses `u128` intermediates to avoid
-//! overflow. Time and duration operators saturate instead of panicking or
-//! wrapping.
+//! and timebase. Conversion arithmetic uses `u128` intermediates, and
+//! conversions, time operators, and duration operators all saturate instead of
+//! panicking or wrapping.
 
 use core::fmt;
 use core::ops::{Add, Sub};
@@ -42,30 +42,21 @@ impl HostTime {
 
     /// Converts this host time to nanoseconds using the given timebase.
     ///
-    /// Uses `u128` intermediate arithmetic to avoid overflow.
+    /// Uses `u128` intermediate arithmetic and saturates at `u64::MAX`.
     #[inline]
     #[must_use]
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "u128 intermediate avoids overflow; truncation back to u64 is intentional"
-    )]
     pub const fn to_nanos(self, timebase: Timebase) -> u64 {
-        let wide = self.0 as u128 * timebase.numer as u128 / timebase.denom as u128;
-        wide as u64
+        timebase.ticks_to_nanos(self.0)
     }
 
     /// Creates a [`HostTime`] from a nanosecond value and timebase.
     ///
-    /// This is the inverse of [`to_nanos`](Self::to_nanos).
+    /// This is the inverse of [`to_nanos`](Self::to_nanos), saturating at
+    /// `u64::MAX`.
     #[inline]
     #[must_use]
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "u128 intermediate avoids overflow; truncation back to u64 is intentional"
-    )]
     pub const fn from_nanos(nanos: u64, timebase: Timebase) -> Self {
-        let wide = nanos as u128 * timebase.denom as u128 / timebase.numer as u128;
-        Self(wide as u64)
+        Self(timebase.nanos_to_ticks(nanos))
     }
 
     /// Returns the duration between `self` and an earlier time, or zero if
@@ -136,17 +127,16 @@ impl fmt::Debug for HostTime {
 ///
 /// This matches the `mach_timebase_info` pattern on macOS. The correct
 /// instance for a given platform is provided by the platform adapter's
-/// `timebase()` function.
+/// `timebase()` function. Both terms are non-zero, so conversion works in
+/// either direction.
 ///
 /// Use [`Timebase::NANOS`] when a backend chooses nanoseconds as its host tick
 /// unit. Do not mix values converted with different timebases inside one
 /// `FrameDriver` or `Scheduler`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Timebase {
-    /// Numerator of the ticks-to-nanoseconds ratio.
-    pub numer: u32,
-    /// Denominator of the ticks-to-nanoseconds ratio.
-    pub denom: u32,
+    numer: u32,
+    denom: u32,
 }
 
 impl Timebase {
@@ -157,36 +147,66 @@ impl Timebase {
     ///
     /// # Panics
     ///
-    /// Panics if `denom` is zero.
+    /// Panics if `numer` or `denom` is zero. Use [`Self::try_new`] for
+    /// values reported by a platform.
     #[inline]
     #[must_use]
     pub const fn new(numer: u32, denom: u32) -> Self {
-        assert!(denom != 0, "timebase denominator must not be zero");
-        Self { numer, denom }
+        match Self::try_new(numer, denom) {
+            Some(timebase) => timebase,
+            None => panic!("timebase numerator and denominator must not be zero"),
+        }
     }
 
-    /// Converts a tick count to nanoseconds.
+    /// Creates a new timebase, or `None` if `numer` or `denom` is zero.
     #[inline]
     #[must_use]
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "u128 intermediate avoids overflow; truncation back to u64 is intentional"
-    )]
+    pub const fn try_new(numer: u32, denom: u32) -> Option<Self> {
+        if numer == 0 || denom == 0 {
+            None
+        } else {
+            Some(Self { numer, denom })
+        }
+    }
+
+    /// Numerator of the ticks-to-nanoseconds ratio.
+    #[inline]
+    #[must_use]
+    pub const fn numer(self) -> u32 {
+        self.numer
+    }
+
+    /// Denominator of the ticks-to-nanoseconds ratio.
+    #[inline]
+    #[must_use]
+    pub const fn denom(self) -> u32 {
+        self.denom
+    }
+
+    /// Converts a tick count to nanoseconds, saturating at `u64::MAX`.
+    #[inline]
+    #[must_use]
     pub const fn ticks_to_nanos(self, ticks: u64) -> u64 {
-        let wide = ticks as u128 * self.numer as u128 / self.denom as u128;
-        wide as u64
+        saturate_u128(ticks as u128 * self.numer as u128 / self.denom as u128)
     }
 
-    /// Converts nanoseconds to a tick count.
+    /// Converts nanoseconds to a tick count, saturating at `u64::MAX`.
     #[inline]
     #[must_use]
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "u128 intermediate avoids overflow; truncation back to u64 is intentional"
-    )]
     pub const fn nanos_to_ticks(self, nanos: u64) -> u64 {
-        let wide = nanos as u128 * self.denom as u128 / self.numer as u128;
-        wide as u64
+        saturate_u128(nanos as u128 * self.denom as u128 / self.numer as u128)
+    }
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the value is clamped to the u64 range first"
+)]
+const fn saturate_u128(value: u128) -> u64 {
+    if value > u64::MAX as u128 {
+        u64::MAX
+    } else {
+        value as u64
     }
 }
 
@@ -319,12 +339,25 @@ mod tests {
     }
 
     #[test]
-    fn overflow_safe_conversion() {
-        // Large tick value that would overflow u64 if multiplied naively
+    fn conversions_saturate() {
         let tb = Timebase::new(125, 3);
-        let t = HostTime(u64::MAX / 2);
-        // Should not panic; result is approximate but deterministic
-        let _nanos = t.to_nanos(tb);
+        assert_eq!(HostTime(u64::MAX / 2).to_nanos(tb), u64::MAX);
+        assert_eq!(Duration(u64::MAX).to_nanos(tb), u64::MAX);
+        let tb = Timebase::new(3, 125);
+        assert_eq!(HostTime::from_nanos(u64::MAX / 2, tb), HostTime(u64::MAX));
+    }
+
+    #[test]
+    fn zero_terms_are_rejected() {
+        assert_eq!(Timebase::try_new(0, 1), None);
+        assert_eq!(Timebase::try_new(1, 0), None);
+        assert_eq!(Timebase::try_new(125, 3), Some(Timebase::new(125, 3)));
+    }
+
+    #[test]
+    #[should_panic(expected = "must not be zero")]
+    fn new_panics_on_zero_numerator() {
+        _ = Timebase::new(0, 1);
     }
 
     #[test]

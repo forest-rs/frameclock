@@ -40,14 +40,11 @@ pub fn timebase() -> Timebase {
         freq > 0 && freq <= i64::from(u32::MAX),
         "QPC frequency {freq} out of u32 range"
     );
-    Timebase {
-        numer: 1_000_000_000,
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "QPC frequency fits in u32 on all known hardware (typically 10 MHz)"
-        )]
-        denom: freq as u32,
-    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "QPC frequency fits in u32 on all known hardware (typically 10 MHz)"
+    )]
+    Timebase::new(1_000_000_000, freq as u32)
 }
 
 #[cfg(test)]
@@ -57,8 +54,8 @@ mod tests {
     #[test]
     fn timebase_is_valid() {
         let tb = timebase();
-        assert_eq!(tb.numer, 1_000_000_000);
-        assert!(tb.denom > 0, "QPC frequency must be positive");
+        assert_eq!(tb.numer(), 1_000_000_000);
+        assert!(tb.denom() > 0, "QPC frequency must be positive");
     }
 
     #[test]

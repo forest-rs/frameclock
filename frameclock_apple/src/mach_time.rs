@@ -34,7 +34,7 @@ pub(crate) fn seconds_to_ticks(seconds: f64, tb: Timebase) -> u64 {
         reason = "f64 to u64 truncation is intentional for positive host-time values"
     )]
     {
-        (nanos * f64::from(tb.denom) / f64::from(tb.numer)) as u64
+        (nanos * f64::from(tb.denom()) / f64::from(tb.numer())) as u64
     }
 }
 

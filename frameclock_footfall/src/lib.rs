@@ -163,7 +163,7 @@ impl Recorder {
     /// Returns how long one host tick lasts, as Footfall records it.
     #[must_use]
     pub const fn period(&self) -> TickPeriod {
-        TickPeriod::new(self.timebase.numer, self.timebase.denom)
+        TickPeriod::new(self.timebase.numer(), self.timebase.denom())
     }
 
     /// Returns the context frame markers and the histogram are emitted under.
