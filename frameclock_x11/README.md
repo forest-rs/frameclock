@@ -29,6 +29,16 @@ See the crate-level documentation for the `ust` clock domain, the
 `PresentNotifyMSC` arming loop, and how pacing behaves while a swapchain owner
 (for example wgpu/Vulkan) presents.
 
+Vblank notifications provide pacing and cadence, and leave
+`FrameTick::prev_actual_present` unset. They do not prove that an application
+frame was displayed. Pixmap completion events preserve their raw completion
+mode; `PresentEvent::actual_present()` returns a timestamp only for known
+presentation modes. Skipped and unknown completions require separate handling.
+
+UST conversion assumes a local Linux X server using the same
+`CLOCK_MONOTONIC` domain as the client. Remote servers and other clock domains
+need external clock synchronization.
+
 ## no_std
 
 This crate keeps its implementation `no_std` (with `alloc`), but reading

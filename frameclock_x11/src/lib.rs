@@ -53,6 +53,10 @@
 //! the same domain a host should stamp input events in. All [`HostTime`] values
 //! are nanosecond ticks.
 //!
+//! This requires a local Linux server whose UST clock shares the client's
+//! `CLOCK_MONOTONIC` domain. Remote servers and servers with another UST domain
+//! require clock synchronization outside this adapter.
+//!
 //! # Pacing while a swapchain presents
 //!
 //! `PresentNotifyMSC` reads the window's vblank clock without presenting
@@ -61,6 +65,13 @@
 //! feedback — which vblank a frame landed on, flip vs. copy, buffer idleness —
 //! only reaches a presenter that itself submits `PresentPixmap`; the
 //! [`PresentEvent`] queue models that feedback for such a presenter.
+//! `NotifyMSC` ticks leave [`FrameTick::prev_actual_present`] unset: a vblank
+//! notification is not evidence that an application frame was shown. Use
+//! [`frameclock::FrameSubmission::new`] with no actual timestamp when a swapchain
+//! owns presentation. Hosts submitting pixmaps can use
+//! [`frameclock::FrameSubmission::reported`] and correlate completion serials
+//! with frame indices, checking [`PresentEvent::actual_present`] and handling
+//! skipped frames before calling [`frameclock::FrameDriver::report_frame`].
 
 #![no_std]
 

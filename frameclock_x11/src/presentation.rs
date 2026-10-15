@@ -25,16 +25,20 @@ pub struct SubmissionId(pub u32);
 /// Per-submission Present feedback event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PresentEvent {
-    /// The submitted pixmap was presented (`PresentCompleteNotify`, kind
-    /// `Pixmap`).
-    Presented {
+    /// A pixmap request completed (`PresentCompleteNotify`, kind `Pixmap`).
+    ///
+    /// Completion may mean presentation or a skipped pixmap. Check
+    /// [`Self::actual_present`] before treating it as presentation evidence.
+    Complete {
         /// Identity of the submission this event corresponds to.
         id: SubmissionId,
-        /// Actual presentation timestamp in host-time ticks.
-        actual_present: HostTime,
+        /// Completion UST timestamp in host-time ticks.
+        ///
+        /// This is not a presentation timestamp for skipped or unknown modes.
+        completed_at: HostTime,
         /// Media stream counter (vblank count) at presentation.
         msc: u64,
-        /// Output where the frame was shown, if known.
+        /// Output associated with the request, if known.
         output: Option<OutputId>,
         /// Raw `CompleteMode` value (`Copy`, `Flip`, `Skip`, …).
         mode: u8,
@@ -48,22 +52,39 @@ pub enum PresentEvent {
 }
 
 impl PresentEvent {
-    /// Builds a [`PresentEvent::Presented`] from raw `PresentCompleteNotify`
+    /// Builds a [`PresentEvent::Complete`] from raw `PresentCompleteNotify`
     /// (kind `Pixmap`) fields, converting `ust` microseconds to host ticks.
     #[must_use]
-    pub const fn presented(
+    pub const fn completed(
         id: SubmissionId,
         ust_micros: u64,
         msc: u64,
         output: Option<OutputId>,
         mode: u8,
     ) -> Self {
-        Self::Presented {
+        Self::Complete {
             id,
-            actual_present: ust_to_host_time(ust_micros),
+            completed_at: ust_to_host_time(ust_micros),
             msc,
             output,
             mode,
+        }
+    }
+
+    /// Returns presentation evidence for a known successful completion mode.
+    ///
+    /// `Copy` (0), `Flip` (1), and `SuboptimalCopy` (3) report presentation.
+    /// `Skip` (2), unknown modes, and idle notifications return `None`. A host
+    /// must handle skipped frames separately when resolving submission feedback.
+    #[must_use]
+    pub const fn actual_present(self) -> Option<HostTime> {
+        match self {
+            Self::Complete {
+                completed_at,
+                mode: 0 | 1 | 3,
+                ..
+            } => Some(completed_at),
+            _ => None,
         }
     }
 }
@@ -134,17 +155,40 @@ mod tests {
     use frameclock::OutputId;
 
     #[test]
-    fn presented_helper_converts_ust_to_host_ticks() {
-        let event = PresentEvent::presented(SubmissionId(9), 1_500_000, 42, Some(OutputId(1)), 1);
+    fn completed_helper_converts_ust_to_host_ticks() {
+        let event = PresentEvent::completed(SubmissionId(9), 1_500_000, 42, Some(OutputId(1)), 1);
         assert_eq!(
             event,
-            PresentEvent::Presented {
+            PresentEvent::Complete {
                 id: SubmissionId(9),
-                actual_present: ust_to_host_time(1_500_000),
+                completed_at: ust_to_host_time(1_500_000),
                 msc: 42,
                 output: Some(OutputId(1)),
                 mode: 1,
             }
+        );
+    }
+
+    #[test]
+    fn skipped_pixmap_is_not_reported_as_presented() {
+        let event = PresentEvent::completed(SubmissionId(9), 1_500_000, 42, None, 2);
+        assert_eq!(event.actual_present(), None);
+        assert!(matches!(event, PresentEvent::Complete { mode: 2, .. }));
+    }
+
+    #[test]
+    fn only_known_presentation_modes_provide_actual_present() {
+        for mode in 0..=u8::MAX {
+            let event = PresentEvent::completed(SubmissionId(9), 1_500_000, 42, None, mode);
+            let expected = matches!(mode, 0 | 1 | 3).then_some(ust_to_host_time(1_500_000));
+            assert_eq!(event.actual_present(), expected, "mode {mode}");
+        }
+        assert_eq!(
+            PresentEvent::Idle {
+                id: SubmissionId(9)
+            }
+            .actual_present(),
+            None
         );
     }
 

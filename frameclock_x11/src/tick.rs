@@ -60,8 +60,9 @@ struct PresentSample {
 /// The Present extension answers a `PresentNotifyMSC` request with a
 /// `PresentCompleteNotify` event carrying the vblank's `ust` (unadjusted
 /// system time, microseconds) and `msc` (media stream counter). One such event
-/// is both the frame-start wake and the actual-present timestamp, so each
-/// completion emits a fully-populated tick.
+/// provides a frame-start wake and a vblank timestamp. It does not report
+/// whether any application frame was displayed, so emitted ticks leave
+/// [`FrameTick::prev_actual_present`] unset.
 ///
 /// Protocol I/O is handled externally; this type contains only the bookkeeping.
 /// Hosts call [`mark_notify_requested`](Self::mark_notify_requested) before
@@ -84,6 +85,10 @@ struct PresentSample {
 /// pacing-only. Because `msc` counts *every* vblank whether or not a frame was
 /// presented into it, this yields the true display cadence even when the app
 /// renders below the refresh rate.
+///
+/// A duplicate or invalid sample pair leaves the last valid sample and
+/// cadence unchanged. Changing the output resets the sample baseline, so
+/// samples from different output counters are never compared.
 #[derive(Debug)]
 pub struct PresentTicker {
     queue: TickQueue,
@@ -122,10 +127,14 @@ impl PresentTicker {
     ///
     /// Update this only when the window actually moves between outputs; the
     /// observed refresh interval is intentionally retained across the change,
-    /// since a stale cadence is a better predictor than none until the new
-    /// output reports its own.
+    /// but the sample baseline is cleared because MSC counters from different
+    /// outputs cannot be compared. Two completions on the new output establish
+    /// its cadence.
     pub fn set_output(&mut self, output: OutputId) {
-        self.output = output;
+        if self.output != output {
+            self.output = output;
+            self.last_present = None;
+        }
     }
 
     /// Records that a `PresentCompleteNotify` event has arrived.
@@ -148,26 +157,31 @@ impl PresentTicker {
             return;
         }
 
-        if let Some(prev) = self.last_present
-            && let Some(interval) = refresh_interval_from_samples(prev, ust_micros, msc)
-        {
-            self.refresh_interval = Some(interval);
-        }
-
-        let actual_present = ust_to_host_time(ust_micros);
+        let sample = PresentSample { ust_micros, msc };
+        let sample = match self.last_present {
+            Some(prev) => match refresh_interval_from_samples(prev, ust_micros, msc) {
+                Some(interval) => {
+                    self.refresh_interval = Some(interval);
+                    sample
+                }
+                None => prev,
+            },
+            None => sample,
+        };
+        let vblank = ust_to_host_time(sample.ust_micros);
         let now = clock.now();
-        let predicted_present = predict_next_present(actual_present, self.refresh_interval, now);
+        let predicted_present = predict_next_present(vblank, self.refresh_interval, now);
 
         let tick = FrameTick {
             now,
             predicted_present,
             refresh_interval: self.refresh_interval,
             output: self.output,
-            prev_actual_present: Some(actual_present),
+            prev_actual_present: None,
         };
 
         self.queue.push(tick);
-        self.last_present = Some(PresentSample { ust_micros, msc });
+        self.last_present = Some(sample);
         self.notify_in_flight = false;
     }
 
@@ -247,7 +261,7 @@ fn predict_next_present(
 #[cfg(test)]
 mod tests {
     use super::{PresentTicker, TickQueue, predict_next_present};
-    use crate::time::{Clock, ust_to_host_time};
+    use crate::time::Clock;
     use frameclock::{HostTime, OutputId};
 
     #[test]
@@ -257,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn first_completion_is_pacing_only_with_actual_present() {
+    fn first_completion_is_pacing_only_without_application_feedback() {
         let mut ticker = PresentTicker::new();
 
         assert!(ticker.mark_notify_requested());
@@ -267,9 +281,59 @@ mod tests {
         // No prior sample, so no cadence and no prediction yet.
         assert_eq!(tick.refresh_interval, None);
         assert_eq!(tick.predicted_present, None);
-        // The vblank's ust (microseconds) becomes the actual-present ticks.
-        assert_eq!(tick.prev_actual_present, Some(ust_to_host_time(1_000_000)));
+        // NotifyMSC reports a vblank, not presentation of an application frame.
+        assert_eq!(tick.prev_actual_present, None);
         assert_eq!(tick.output, OutputId(0));
+    }
+
+    #[test]
+    fn notify_msc_does_not_report_an_application_frame_as_presented() {
+        use frameclock::{
+            Duration, FrameBeginResult, FrameDemand, FrameDriver, FrameOpportunity,
+            FrameSubmission, SchedulerConfig,
+        };
+
+        let mut driver = FrameDriver::new(SchedulerConfig::pacing_only());
+        driver.request(FrameDemand::INPUT);
+        let begin = driver.begin_frame(FrameOpportunity::pacing_only(
+            HostTime(1_000_000_000),
+            Duration(16_667_000),
+            OutputId(0),
+        ));
+        let FrameBeginResult::Ready(frame) = begin.result else {
+            panic!("the first pacing opportunity should be ready");
+        };
+        let _ = driver.submit_frame(frame, FrameSubmission::deferred(HostTime(1_000_001_000)));
+
+        let mut ticker = PresentTicker::new();
+        assert!(ticker.mark_notify_requested());
+        ticker.on_complete_notify(Clock::Monotonic, 1_016_667, 101);
+        let tick = ticker.poll_tick().unwrap();
+        assert_eq!(tick.prev_actual_present, None);
+        let begin = driver.begin_frame(crate::frame_opportunity(tick, Duration(16_667_000)));
+        assert!(
+            begin.resolved_feedback.is_none(),
+            "a vblank must not resolve deferred application presentation"
+        );
+    }
+
+    #[test]
+    fn changing_output_does_not_measure_cadence_across_counter_domains() {
+        let mut ticker = PresentTicker::new();
+        assert!(ticker.mark_notify_requested());
+        ticker.on_complete_notify(Clock::Monotonic, 1_000_000, 100);
+        assert!(ticker.mark_notify_requested());
+        ticker.on_complete_notify(Clock::Monotonic, 1_016_667, 101);
+        assert_eq!(ticker.observed_refresh_interval(), Some(16_667_000));
+
+        ticker.set_output(OutputId(1));
+        assert!(ticker.mark_notify_requested());
+        ticker.on_complete_notify(Clock::Monotonic, 1_033_334, 10_000);
+        assert_eq!(ticker.observed_refresh_interval(), Some(16_667_000));
+
+        assert!(ticker.mark_notify_requested());
+        ticker.on_complete_notify(Clock::Monotonic, 1_041_667, 10_001);
+        assert_eq!(ticker.observed_refresh_interval(), Some(8_333_000));
     }
 
     #[test]
@@ -325,6 +389,21 @@ mod tests {
         assert!(ticker.mark_notify_requested());
         ticker.on_complete_notify(Clock::Monotonic, 3_016_667, 301);
         let _ = ticker.poll_tick();
+        assert_eq!(ticker.observed_refresh_interval(), Some(16_667_000));
+    }
+
+    #[test]
+    fn duplicate_msc_does_not_poison_the_next_cadence_measurement() {
+        let mut ticker = PresentTicker::new();
+        for (ust, msc) in [
+            (3_000_000, 300),
+            (3_016_667, 301),
+            (3_020_667, 301),
+            (3_033_334, 302),
+        ] {
+            assert!(ticker.mark_notify_requested());
+            ticker.on_complete_notify(Clock::Monotonic, ust, msc);
+        }
         assert_eq!(ticker.observed_refresh_interval(), Some(16_667_000));
     }
 
