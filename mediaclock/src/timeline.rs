@@ -4,7 +4,7 @@
 //! Stateful media timeline wrapper.
 
 use crate::{AffineClock, AffineClockUpdate};
-use frameclock::HostTime;
+use frameclock::{Duration, HostTime};
 
 /// Host-facing media timeline built on [`AffineClock`].
 ///
@@ -35,6 +35,12 @@ impl MediaTimeline {
     pub const DEFAULT_OFFSET_ALPHA: f64 = 0.1;
     /// Default media-time error, in seconds, that is treated as a discontinuity.
     pub const DEFAULT_DISCONTINUITY_THRESHOLD: f64 = 0.25;
+    /// Default shortest span, in host seconds, that a rate is estimated over.
+    ///
+    /// This is just under one 60 Hz frame, so once-per-frame observations each
+    /// estimate a rate while closer ones wait for a longer span. See
+    /// [`AffineClock::with_min_rate_span`].
+    pub const DEFAULT_MIN_RATE_SPAN_SECONDS: f64 = 0.015;
 
     /// Creates a media timeline for the given host-time scale.
     ///
@@ -58,7 +64,9 @@ impl MediaTimeline {
     /// Creates a media timeline with explicit smoothing and discontinuity
     /// settings.
     ///
-    /// The smoothing factors are interpreted as by [`AffineClock::new`].
+    /// The smoothing factors are interpreted as by [`AffineClock::new`]. Rates
+    /// are estimated over at least [`Self::DEFAULT_MIN_RATE_SPAN_SECONDS`];
+    /// use [`with_min_rate_span`](Self::with_min_rate_span) to change that.
     ///
     /// # Panics
     ///
@@ -70,14 +78,26 @@ impl MediaTimeline {
         offset_alpha: f64,
         discontinuity_threshold: f64,
     ) -> Self {
+        let clock =
+            AffineClock::new(seconds_per_host_tick, rate_alpha, offset_alpha).with_min_rate_span(
+                span_in_host_ticks(Self::DEFAULT_MIN_RATE_SPAN_SECONDS, seconds_per_host_tick),
+            );
         Self {
-            clock: AffineClock::new(seconds_per_host_tick, rate_alpha, offset_alpha),
+            clock,
             seconds_per_host_tick,
             playback_rate: 1.0,
             discontinuity_threshold,
             paused: false,
             paused_media_time: 0.0,
         }
+    }
+
+    /// Sets the shortest host span, in host ticks, that a rate is estimated
+    /// over, as described by [`AffineClock::with_min_rate_span`].
+    #[must_use]
+    pub fn with_min_rate_span(mut self, span: Duration) -> Self {
+        self.clock = self.clock.with_min_rate_span(span);
+        self
     }
 
     /// Returns the current commanded playback rate.
@@ -206,6 +226,23 @@ impl MediaTimeline {
     }
 }
 
+/// Converts `seconds` of host time to the nearest whole host tick, or zero if
+/// the tick length is not positive.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a float-to-int cast saturates, and the span is clamped to be non-negative"
+)]
+fn span_in_host_ticks(seconds: f64, seconds_per_host_tick: f64) -> Duration {
+    if seconds_per_host_tick > 0.0 {
+        // `f64::round` needs `std`; adding a half before truncating rounds a
+        // non-negative value.
+        Duration(((seconds / seconds_per_host_tick).max(0.0) + 0.5) as u64)
+    } else {
+        Duration::ZERO
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,6 +296,25 @@ mod tests {
         assert_eq!(timeline.effective_rate(), 2e-9);
         assert!((timeline.media_time_at(host(1_000_000_000)).unwrap() - 1.0).abs() < 1e-12);
         assert!((timeline.media_time_at(host(2_000_000_000)).unwrap() - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn default_min_rate_span_is_in_host_ticks() {
+        assert_eq!(span_in_host_ticks(0.015, 1e-9), Duration(15_000_000));
+        assert_eq!(span_in_host_ticks(0.015, 1e-6), Duration(15_000));
+        assert_eq!(span_in_host_ticks(0.015, 0.0), Duration::ZERO);
+        assert_eq!(span_in_host_ticks(0.015, -1e-9), Duration::ZERO);
+    }
+
+    #[test]
+    fn close_observations_do_not_learn_a_rate_by_default() {
+        let mut timeline = MediaTimeline::new(1e-9);
+        timeline.observe(host(0), 0.0);
+        timeline.observe(host(1_000_000_000), 1.0);
+        // 10 us later, 90 us of timestamp jitter.
+        timeline.observe(host(1_000_010_000), 1.000_1);
+
+        assert_eq!(timeline.effective_rate(), 1e-9);
     }
 
     #[test]
