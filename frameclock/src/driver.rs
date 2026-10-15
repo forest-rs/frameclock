@@ -1724,6 +1724,7 @@ mod tests {
             present_latency: Duration::ZERO,
             work: None,
             submitted_at: HostTime(20),
+            commit_deadline: HostTime(u64::MAX),
             build_start: HostTime(10),
             expected_present: None,
             actual_present: None,

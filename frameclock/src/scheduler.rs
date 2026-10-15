@@ -81,6 +81,11 @@ pub struct SchedulerConfig {
     /// seen: [`FramePlan::target_present`] moves by whole refresh
     /// intervals, and the frame rate does not change.
     ///
+    /// Only frames committed by their deadline teach the estimate: a frame
+    /// whose own build ran late is late for that reason alone. The estimate
+    /// starts at zero, so one late frame moves it by this factor of its
+    /// lateness rather than setting it.
+    ///
     /// [`PresentFeedback::actual_present`]: crate::timing::PresentFeedback::actual_present
     pub present_latency_alpha: f64,
 }
@@ -189,6 +194,15 @@ impl Ema {
             value: 0.0,
             alpha,
             initialized: false,
+        }
+    }
+
+    /// An average that starts from `value`, so no single sample sets it.
+    const fn seeded(alpha: f64, value: f64) -> Self {
+        Self {
+            value,
+            alpha,
+            initialized: true,
         }
     }
 
@@ -309,7 +323,7 @@ impl Scheduler {
         Self {
             pipeline_depth: config.initial_depth,
             build_cost_ema: Ema::new(config.ema_alpha),
-            present_latency_ema: Ema::new(sanitize_ema_alpha(config.present_latency_alpha)),
+            present_latency_ema: Ema::seeded(sanitize_ema_alpha(config.present_latency_alpha), 0.0),
             present_latency_ticks: 0,
             safety_margin_ticks: 0,
             consecutive_misses: 0,
@@ -526,8 +540,11 @@ impl Scheduler {
 
         // Learn how late frames are shown. The frame was planned for a
         // target that already carried the estimate, so what is left over
-        // corrects it: late frames raise it, early ones lower it.
+        // corrects it: late frames raise it, early ones lower it. A frame
+        // committed after its deadline was late because of its own build,
+        // not the presentation pipeline, so it teaches nothing here.
         if self.config.present_latency_alpha > 0.0
+            && feedback.submitted_at <= feedback.commit_deadline
             && let (Some(actual), Some(expected)) =
                 (feedback.actual_present, feedback.expected_present)
         {
@@ -730,6 +747,7 @@ mod tests {
             sched.observe(&PresentFeedback {
                 present_latency: Duration::ZERO,
                 submitted_at: HostTime(1500),
+                commit_deadline: plan.commit_deadline,
                 build_start: HostTime(1000),
                 work: None,
                 expected_present: plan.target_present,
@@ -761,6 +779,65 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_committed_late_does_not_teach_present_latency() {
+        let mut config = SchedulerConfig::predictive();
+        config.degradation_policy = DegradationPolicy::Fixed;
+        let mut sched = Scheduler::new(config);
+        let plan = sched.plan(
+            make_opportunity(PresentationTiming::Predictive, 1000, Some(2000), 1800),
+            FrameDemand::ANIMATION,
+            0,
+        );
+
+        // A long first build, such as shader compilation: the frame missed
+        // its commit deadline and was shown 200 ms late.
+        sched.observe(&PresentFeedback::new(
+            &plan,
+            HostTime(1000),
+            HostTime(200_001_000),
+            Some(HostTime(200_002_000)),
+        ));
+
+        assert_eq!(sched.present_latency_ticks(), 0);
+        let next = sched.plan(
+            make_opportunity(PresentationTiming::Predictive, 1000, Some(2000), 1800),
+            FrameDemand::ANIMATION,
+            1,
+        );
+        assert_eq!(next.present_latency, Duration::ZERO);
+    }
+
+    #[test]
+    fn one_frame_shown_late_does_not_set_present_latency_outright() {
+        let mut config = SchedulerConfig::predictive();
+        config.degradation_policy = DegradationPolicy::Fixed;
+        let mut sched = Scheduler::new(config);
+        let plan = sched.plan(
+            make_opportunity(PresentationTiming::Predictive, 1000, Some(2000), 1800),
+            FrameDemand::ANIMATION,
+            0,
+        );
+
+        // Committed on time, but a compositor stall showed it 12 refreshes
+        // late. One sample moves the estimate by `present_latency_alpha` of
+        // that, not all of it.
+        let stall = 12 * REFRESH_INTERVAL.ticks();
+        sched.observe(&PresentFeedback::new(
+            &plan,
+            HostTime(1000),
+            HostTime(1500),
+            Some(HostTime(2000 + stall)),
+        ));
+
+        let next = sched.plan(
+            make_opportunity(PresentationTiming::Predictive, 1000, Some(2000), 1800),
+            FrameDemand::ANIMATION,
+            1,
+        );
+        assert_eq!(next.present_latency, REFRESH_INTERVAL);
+    }
+
+    #[test]
     fn present_latency_compensation_is_off_without_actual_present_times() {
         let mut config = SchedulerConfig::predictive();
         config.degradation_policy = DegradationPolicy::Fixed;
@@ -769,6 +846,7 @@ mod tests {
             sched.observe(&PresentFeedback {
                 present_latency: Duration::ZERO,
                 submitted_at: HostTime(1500),
+                commit_deadline: HostTime(u64::MAX),
                 build_start: HostTime(1000),
                 work: None,
                 expected_present: Some(HostTime(2000)),
@@ -844,6 +922,7 @@ mod tests {
             present_latency: Duration::ZERO,
             work: None,
             submitted_at: HostTime(1_200),
+            commit_deadline: HostTime(u64::MAX),
             build_start: HostTime(1_000),
             expected_present: None,
             actual_present: None,
@@ -872,6 +951,7 @@ mod tests {
             present_latency: Duration::ZERO,
             work: None,
             submitted_at: HostTime(1_200),
+            commit_deadline: HostTime(u64::MAX),
             build_start: HostTime(1_000),
             expected_present: None,
             actual_present: None,
@@ -946,6 +1026,7 @@ mod tests {
             present_latency: Duration::ZERO,
             work: None,
             submitted_at: HostTime(21_000_000),
+            commit_deadline: HostTime(u64::MAX),
             build_start: HostTime(1_000_000),
             expected_present: None,
             actual_present: None,
@@ -982,6 +1063,7 @@ mod tests {
             present_latency: Duration::ZERO,
             work: None,
             submitted_at: HostTime(11_000_000),
+            commit_deadline: HostTime(u64::MAX),
             build_start: HostTime(1_000_000),
             expected_present: None,
             actual_present: None,
@@ -1017,6 +1099,7 @@ mod tests {
             present_latency: Duration::ZERO,
             work: None,
             submitted_at: HostTime(13_000_000),
+            commit_deadline: HostTime(u64::MAX),
             build_start: HostTime(1_000_000),
             expected_present: None,
             actual_present: None,
@@ -1059,6 +1142,7 @@ mod tests {
             present_latency: Duration::ZERO,
             work: None,
             submitted_at: HostTime(13_000_000),
+            commit_deadline: HostTime(u64::MAX),
             build_start: HostTime(1_000_000),
             expected_present: None,
             actual_present: None,
@@ -1101,6 +1185,7 @@ mod tests {
             present_latency: Duration::ZERO,
             work: None,
             submitted_at: HostTime(2000),
+            commit_deadline: HostTime(u64::MAX),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -1190,6 +1275,7 @@ mod tests {
             present_latency: Duration::ZERO,
             work: None,
             submitted_at: HostTime(2000),
+            commit_deadline: HostTime(u64::MAX),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -1221,6 +1307,7 @@ mod tests {
             present_latency: Duration::ZERO,
             work: None,
             submitted_at: HostTime(2000),
+            commit_deadline: HostTime(u64::MAX),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -1248,6 +1335,7 @@ mod tests {
             present_latency: Duration::ZERO,
             work: None,
             submitted_at: HostTime(2000),
+            commit_deadline: HostTime(u64::MAX),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -1277,6 +1365,7 @@ mod tests {
             present_latency: Duration::ZERO,
             work: None,
             submitted_at: HostTime(2000),
+            commit_deadline: HostTime(u64::MAX),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -1307,6 +1396,7 @@ mod tests {
             present_latency: Duration::ZERO,
             work: None,
             submitted_at: HostTime(2000),
+            commit_deadline: HostTime(u64::MAX),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -1351,6 +1441,7 @@ mod tests {
             present_latency: Duration::ZERO,
             work: None,
             submitted_at: HostTime(2000),
+            commit_deadline: HostTime(u64::MAX),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -1387,6 +1478,7 @@ mod tests {
             present_latency: Duration::ZERO,
             work: None,
             submitted_at: HostTime(2_000),
+            commit_deadline: HostTime(u64::MAX),
             build_start: HostTime(1_000),
             expected_present: None,
             actual_present: None,
@@ -1420,6 +1512,7 @@ mod tests {
             present_latency: Duration::ZERO,
             work: None,
             submitted_at: HostTime(2000),
+            commit_deadline: HostTime(u64::MAX),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -1444,6 +1537,7 @@ mod tests {
             present_latency: Duration::ZERO,
             work: None,
             submitted_at: HostTime(2000),
+            commit_deadline: HostTime(u64::MAX),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -1467,6 +1561,7 @@ mod tests {
             present_latency: Duration::ZERO,
             work: None,
             submitted_at: HostTime(2_000),
+            commit_deadline: HostTime(u64::MAX),
             build_start: HostTime(1_000),
             expected_present: None,
             actual_present: None,
@@ -1492,6 +1587,7 @@ mod tests {
             present_latency: Duration::ZERO,
             work: None,
             submitted_at: HostTime(2_000),
+            commit_deadline: HostTime(u64::MAX),
             build_start: HostTime(1_000),
             expected_present: None,
             actual_present: None,

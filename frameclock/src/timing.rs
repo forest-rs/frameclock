@@ -502,6 +502,11 @@ impl PresentHints {
 pub struct PresentFeedback {
     /// Host time when the frame was submitted/committed.
     pub submitted_at: HostTime,
+    /// Latest time the frame could be committed to make its target present.
+    ///
+    /// A frame submitted after this was late because of its own build, so
+    /// how late it was shown says nothing about presentation latency.
+    pub commit_deadline: HostTime,
     /// When the frame began building (for build cost estimation).
     pub build_start: HostTime,
     /// The presentation latency the plan was made with, carried back so
@@ -645,6 +650,7 @@ impl PresentFeedback {
 
         Self {
             submitted_at,
+            commit_deadline: hints.latest_commit(),
             build_start,
             present_latency: Duration::ZERO,
             work: None,
