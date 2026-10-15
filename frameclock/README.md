@@ -156,24 +156,33 @@ match begin.result {
 }
 ```
 
-## Late, Per-Frame Feedback
+## Submitting Frames
 
-Some hosts learn what became of a frame only after later frames were
-submitted: a GPU renderer's completion and presented handlers, compositor
-presentation events, swapchain statistics. Such a host submits with
-`FrameSubmission::reported(submitted_at)` and, as each frame's facts arrive,
-calls `FrameDriver::report_frame(frame_index, FrameReport { ready_at, outcome })`.
-The driver holds up to `REPORTED_FRAME_CAPACITY` frames, resolves each from
-its own report in any order, and returns its summary from that call.
+Submit each frame with the `FrameSubmission` that matches the presentation
+evidence the platform gives you:
 
-`ready_at` is when the frame's content was complete (for a GPU renderer, when
-its work finished). Build cost runs to it rather than to the submission, so a
-frame whose GPU work outlasts the refresh interval makes the scheduler choose a
-slower, steady cadence instead of alternating intervals.
+| The platform tells you | Submit with | The frame's summary arrives |
+| --- | --- | --- |
+| Nothing beyond your own commit | `FrameSubmission::new(submitted_at, None)` | From `submit_frame`, judged by commit timing |
+| The present time on the next tick, as `FrameTick::prev_actual_present` | `FrameSubmission::deferred(submitted_at)` | In `FrameBegin::resolved_feedback` from a later `begin_frame` |
+| Each frame's fate later, in any order | `FrameSubmission::reported(submitted_at)` | From `FrameDriver::report_frame` |
 
-`FrameSubmission::deferred` remains right for hosts whose submission reaches
-the screen at the next refresh: the next tick's `prev_actual_present` is then
-that frame's present.
+`deferred` suits a host whose submission reaches the screen at the next
+refresh, so the next tick's `prev_actual_present` is that frame's present. Each
+platform adapter's README says which row it fits.
+
+`reported` suits a host that learns what became of a frame only after later
+frames were submitted: a GPU renderer's completion and presented handlers,
+compositor presentation events, swapchain statistics. As each frame's facts
+arrive, call `FrameDriver::report_frame(frame_index, FrameReport { work,
+outcome })`, with `frame_index` from the frame's `FramePlan`. `outcome` is a
+`PresentOutcome`: presented at a host time, never presented, or unknown.
+`work` is what the frame cost beyond the host's own build, such as how long its
+GPU work took, if the platform can say; the scheduler takes the longer of it
+and the host's span, so a frame whose GPU work outlasts the refresh interval
+makes it choose a slower, steady cadence instead of alternating intervals. The
+driver holds up to `REPORTED_FRAME_CAPACITY` frames, resolves each from its own
+report in any order, and returns its summary from that call.
 
 ## Display Timing And VRR
 
