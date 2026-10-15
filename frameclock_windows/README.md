@@ -62,9 +62,8 @@ loop {
             );
             _ = submit.summary;
         }
-        FrameBeginResult::WaitUntil(frame_start) => {
-            // Wait until frame_start, then call begin_frame again.
-            _ = frame_start;
+        FrameBeginResult::Wait(_) => {
+            // The cadence starts this frame at a later vblank.
         }
         FrameBeginResult::Expired(summary) => {
             // Record the dropped-frame summary and request fresh demand if needed.
@@ -85,6 +84,14 @@ is in QPC ticks too: a raw `Duration(16_666_667)` would mean about 1.7 s, and
 debug builds of the scheduler panic on display timing that slow. When the host
 knows nothing about the output, `default_display_timing` is a fixed 60 Hz in
 QPC ticks.
+
+The hints start each frame at a tick, so the loop is handed ready frames and
+never has to wake itself between vblanks; a frame the cadence holds back
+returns `Wait(FrameWait::NextTick)` and is ready at the later vblank it waits
+for. A host with its own timer can start frames nearer their deadline instead:
+mark the hints `starting_when_planned`, wake at the time
+`Wait(FrameWait::Until(time))` gives, and call
+`FrameDriver::begin_pending_frame`.
 
 ## Variable Refresh
 
