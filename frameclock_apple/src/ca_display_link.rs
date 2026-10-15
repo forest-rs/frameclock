@@ -56,6 +56,15 @@ impl DisplayLinkTarget {
         unsafe { msg_send![super(this), init] }
     }
 
+    /// Makes the next tick report no previous present.
+    ///
+    /// The first callback after a pause or stop carries the timestamp of
+    /// the refresh just before it, which can be long after any frame the
+    /// host submitted before pausing.
+    fn forget_previous_timestamp(&self) {
+        self.ivars().has_previous_timestamp.set(false);
+    }
+
     fn handle_tick(&self, sender: &AnyObject) {
         let ivars = self.ivars();
 
@@ -93,7 +102,7 @@ impl DisplayLinkTarget {
 /// the main thread.
 pub struct DisplayLink {
     raw: Retained<CADisplayLinkRaw>,
-    _target: Retained<DisplayLinkTarget>,
+    target: Retained<DisplayLinkTarget>,
 }
 
 impl fmt::Debug for DisplayLink {
@@ -134,10 +143,7 @@ impl DisplayLink {
             )
         };
 
-        Self {
-            raw,
-            _target: target,
-        }
+        Self { raw, target }
     }
 
     /// Starts the display link by adding it to the main run loop.
@@ -150,12 +156,16 @@ impl DisplayLink {
     }
 
     /// Stops the display link by removing it from the main run loop.
+    ///
+    /// The first tick after the link starts again reports no
+    /// [`FrameTick::prev_actual_present`].
     pub fn stop(&self) {
         let run_loop = NSRunLoop::mainRunLoop();
         unsafe {
             self.raw
                 .removeFromRunLoop_forMode(&run_loop, NSDefaultRunLoopMode);
         }
+        self.target.forget_previous_timestamp();
     }
 
     /// Returns whether the display link is currently paused.
@@ -167,8 +177,13 @@ impl DisplayLink {
     /// Pauses or resumes the display link without removing it from the run loop.
     ///
     /// Hosts can pause when no frame demand is pending and resume when input,
-    /// animation, or other visible work arrives.
+    /// animation, or other visible work arrives. The first tick after a
+    /// resume reports no [`FrameTick::prev_actual_present`], so a frame
+    /// submitted before the pause is not judged by a refresh long after it.
     pub fn set_paused(&self, paused: bool) {
+        if paused {
+            self.target.forget_previous_timestamp();
+        }
         self.raw.setPaused(paused);
     }
 
