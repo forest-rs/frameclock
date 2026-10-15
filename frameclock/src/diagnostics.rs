@@ -180,6 +180,13 @@ pub enum FrameDropReason {
     /// Newer work replaced this frame before it was submitted.
     Superseded,
     /// The frame was still queued after its commit deadline had passed.
+    ///
+    /// Its work never started, so this is not a slow build: the host did not
+    /// call [`FrameDriver::begin_frame`](crate::FrameDriver::begin_frame) or
+    /// [`FrameDriver::begin_pending_frame`](crate::FrameDriver::begin_pending_frame)
+    /// between the plan's frame start and its deadline. A host that starts
+    /// frames only from its frame callback needs hints that
+    /// [start at a tick](crate::PresentHints::starting_at_tick).
     MissedDeadline,
     /// The native surface, drawable, or swapchain image was unavailable.
     SurfaceUnavailable,

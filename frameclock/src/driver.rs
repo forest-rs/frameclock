@@ -496,6 +496,20 @@ impl FrameDriver {
         !self.pending_demand.is_empty()
     }
 
+    /// Returns whether the host should keep frame callbacks coming.
+    ///
+    /// This is true while demand waits to be planned, a queued frame waits
+    /// for a later tick, or a [deferred](FrameSubmission::deferred)
+    /// submission waits for the tick whose
+    /// [`FrameTick::prev_actual_present`] resolves it. A host that requests
+    /// each callback, such as a Wayland or X11 host, requests the next one
+    /// while this holds; one whose callbacks run continuously, such as a
+    /// display link, can pause them when it does not.
+    #[must_use]
+    pub const fn needs_tick(&self) -> bool {
+        self.has_pending_demand() || self.pending_frame.is_some() || self.pending_feedback.is_some()
+    }
+
     /// Returns the currently queued frame, if any.
     ///
     /// The queued plan carries the next candidate frame index. The driver
@@ -564,22 +578,45 @@ impl FrameDriver {
     pub fn begin_frame(&mut self, opportunity: FrameOpportunity) -> FrameBegin {
         let resolved_feedback =
             self.resolve_deferred_feedback(opportunity.tick.prev_actual_present);
-        let result = match self.take_next(opportunity) {
+        let result = self.take_next(opportunity);
+        let result = self.begin_result(result, opportunity.tick.now);
+        FrameBegin {
+            resolved_feedback,
+            result,
+        }
+    }
+
+    /// Begins the queued frame from the host's own wake, without a new tick.
+    ///
+    /// A host whose hints start frames
+    /// [when planned](crate::PresentHints::starting_when_planned) wakes
+    /// itself at the time [`FrameBeginResult::WaitUntil`] returned and calls
+    /// this with the current host time. The queued frame is then
+    /// [`Ready`](FrameBeginResult::Ready), or
+    /// [`Expired`](FrameBeginResult::Expired) if the wake came after its
+    /// commit deadline. This returns [`WaitUntil`](FrameBeginResult::WaitUntil)
+    /// again if `now` is still early, and [`Idle`](FrameBeginResult::Idle)
+    /// when no frame is queued. It plans no new frame: pending demand waits
+    /// for the next [`begin_frame`](Self::begin_frame).
+    #[must_use]
+    pub fn begin_pending_frame(&mut self, now: HostTime) -> FrameBeginResult {
+        let result = self.take_pending(now).unwrap_or(DriverBeginResult::Idle);
+        self.begin_result(result, now)
+    }
+
+    fn begin_result(&mut self, result: DriverBeginResult, now: HostTime) -> FrameBeginResult {
+        match result {
             DriverBeginResult::Idle => FrameBeginResult::Idle,
             DriverBeginResult::WaitUntil(frame_start) => FrameBeginResult::WaitUntil(frame_start),
             DriverBeginResult::Ready(frame) => {
-                FrameBeginResult::Ready(ActiveFrame::new(frame, opportunity.tick.now))
+                FrameBeginResult::Ready(ActiveFrame::new(frame, now))
             }
             DriverBeginResult::Expired(frame) => {
-                let frame = ActiveFrame::new(frame, opportunity.tick.now);
+                let frame = ActiveFrame::new(frame, now);
                 FrameBeginResult::Expired(
                     self.discard_frame_with_reason(frame, FrameDropReason::MissedDeadline),
                 )
             }
-        };
-        FrameBegin {
-            resolved_feedback,
-            result,
         }
     }
 
@@ -837,19 +874,24 @@ impl FrameDriver {
     /// This plans pending demand when needed, retains future-start plans, and
     /// reports an expired result instead of returning a frame whose commit
     /// deadline has already passed.
+    fn take_pending(&mut self, now: HostTime) -> Option<DriverBeginResult> {
+        let frame = self.pending_frame?;
+        if now < frame.plan.frame_start {
+            return Some(DriverBeginResult::WaitUntil(frame.plan.frame_start));
+        }
+
+        self.pending_frame = None;
+        let frame = self.consume_frame_index(frame);
+        if now > frame.plan.commit_deadline {
+            return Some(DriverBeginResult::Expired(frame));
+        }
+        Some(DriverBeginResult::Ready(frame))
+    }
+
     fn take_next(&mut self, opportunity: FrameOpportunity) -> DriverBeginResult {
         let tick = opportunity.tick;
-        if let Some(frame) = self.pending_frame {
-            if tick.now < frame.plan.frame_start {
-                return DriverBeginResult::WaitUntil(frame.plan.frame_start);
-            }
-
-            self.pending_frame = None;
-            let frame = self.consume_frame_index(frame);
-            if tick.now > frame.plan.commit_deadline {
-                return DriverBeginResult::Expired(frame);
-            }
-            return DriverBeginResult::Ready(frame);
+        if let Some(result) = self.take_pending(tick.now) {
+            return result;
         }
 
         if self.pending_demand.is_empty() {
@@ -1810,5 +1852,85 @@ mod tests {
         };
         assert!(frame.plan().demand.contains(FrameDemand::INPUT));
         assert_eq!(frame.plan().frame_start, HostTime(1_100));
+    }
+
+    #[test]
+    fn a_host_wake_begins_the_queued_frame() {
+        let mut driver = driver();
+        assert!(matches!(
+            driver.begin_pending_frame(HostTime(1_000)),
+            FrameBeginResult::Idle
+        ));
+        assert!(!driver.needs_tick());
+
+        driver.request(FrameDemand::ANIMATION);
+        let FrameBeginResult::WaitUntil(frame_start) =
+            driver.begin_frame(opportunity(1_000, 0)).result
+        else {
+            panic!("an animation frame starts as late as its deadline allows");
+        };
+        assert!(driver.needs_tick());
+        assert!(matches!(
+            driver.begin_pending_frame(HostTime(frame_start.ticks() - 1)),
+            FrameBeginResult::WaitUntil(start) if start == frame_start
+        ));
+
+        let FrameBeginResult::Ready(frame) = driver.begin_pending_frame(frame_start) else {
+            panic!("the wake at its start must release the frame");
+        };
+        assert_eq!(frame.build_start(), frame_start);
+        assert!(!driver.needs_tick());
+        assert!(matches!(
+            driver.begin_pending_frame(frame_start),
+            FrameBeginResult::Idle
+        ));
+    }
+
+    #[test]
+    fn a_deferred_submission_needs_the_tick_that_resolves_it() {
+        let mut driver = driver();
+        driver.request(FrameDemand::INPUT);
+        let frame = ready_at(&mut driver, 0);
+        let submit = driver.submit_frame(frame, FrameSubmission::deferred(HostTime(50)));
+        assert!(submit.awaiting_actual_present);
+        assert!(!driver.has_pending_demand());
+        assert!(
+            driver.needs_tick(),
+            "pausing now would strand the frame's summary"
+        );
+
+        // A tick without a present time leaves it waiting.
+        let _ = driver.begin_frame(opportunity(100, 1));
+        assert!(driver.needs_tick());
+
+        let begin = driver.begin_frame(predictive_opportunity_with_prev_actual(
+            200,
+            1,
+            300,
+            290,
+            Some(HostTime(120)),
+        ));
+        assert!(begin.resolved_feedback.is_some());
+        assert!(!driver.needs_tick());
+    }
+
+    #[test]
+    fn a_late_host_wake_expires_the_queued_frame() {
+        let mut driver = driver();
+        driver.request(FrameDemand::ANIMATION);
+        let begin = driver.begin_frame(opportunity(1_000, 0));
+        assert!(matches!(begin.result, FrameBeginResult::WaitUntil(_)));
+
+        let FrameBeginResult::Expired(summary) = driver.begin_pending_frame(HostTime(1_200)) else {
+            panic!("a wake after the deadline must expire the frame");
+        };
+        assert_eq!(summary.drop_reason, Some(FrameDropReason::MissedDeadline));
+    }
+
+    #[test]
+    fn hints_starting_when_planned_undo_starting_at_tick() {
+        let hints = hints(1_100).starting_at_tick().starting_when_planned();
+        assert!(!hints.starts_at_tick());
+        assert_eq!(hints, self::hints(1_100));
     }
 }
