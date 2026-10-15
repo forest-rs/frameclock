@@ -46,14 +46,13 @@ wgpu/Vulkan, presents. Protocol requests and event decoding are the host's;
 they appear here as comments.
 
 ```rust,ignore
-use frameclock::{Duration, FrameBeginResult, FrameDemand, FrameDriver, FrameSubmission};
+use frameclock::{FrameBeginResult, FrameDemand, FrameDriver, FrameSubmission};
 use frameclock_x11::{Clock, PresentTicker};
 
 let mut driver = FrameDriver::new(frameclock_x11::scheduler_config());
 let mut ticker = PresentTicker::new();
-// Host times are nanoseconds. Used until two completions establish the
-// cadence.
-let fallback_interval = Duration(16_666_667);
+// 60 Hz, refined from the ticks once two completions establish the cadence.
+let display_timing = frameclock_x11::default_display_timing();
 
 // When the app has visual work, arm a notify for the next vblank.
 driver.request(FrameDemand::ANIMATION);
@@ -67,7 +66,7 @@ ticker.on_complete_notify(Clock::Monotonic, ust, msc);
 
 // After dispatch, plan frames for the queued ticks.
 while let Some(tick) = ticker.poll_tick() {
-    let opportunity = frameclock_x11::frame_opportunity(tick, fallback_interval);
+    let opportunity = frameclock_x11::frame_opportunity(tick, display_timing);
     if let FrameBeginResult::Ready(frame) = driver.begin_frame(opportunity).result {
         // Render for frame.sample_time() and present through the swapchain.
         let submit = driver.submit_frame(
@@ -82,6 +81,18 @@ while let Some(tick) = ticker.poll_tick() {
 Use `scheduler_config` for the `FrameDriver`: it is
 `SchedulerConfig::estimated` in nanoseconds, matching the estimated hints
 `frame_opportunity` builds once two completions have established a cadence.
+
+## Variable Refresh
+
+The `DisplayTiming` passed to `frame_opportunity` describes the output the
+tick was made for; rebuild it when the window moves to another output or the
+mode changes. When the output is variable-refresh capable (RandR's
+`vrr_capable` property) and the window has opted in with `_VARIABLE_REFRESH`,
+pass `DisplayTiming::variable` with the output's range. Present does not
+report the range, so read it from RandR's `EDID` output property or host
+configuration. Variable timing is kept as is, since on such an output the
+tick's refresh interval is only the last measured `msc` gap; fixed timing is
+refined from the tick.
 
 ## Submitting Frames
 

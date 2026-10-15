@@ -40,7 +40,7 @@
 //!
 //! // After dispatch, drain the queued ticks and build opportunities:
 //! while let Some(tick) = ticker.poll_tick() {
-//!     let opportunity = frame_opportunity(tick, fallback_refresh_interval);
+//!     let opportunity = frame_opportunity(tick, fallback_timing);
 //!     _ = opportunity;
 //! }
 //! ```
@@ -104,6 +104,17 @@ pub const fn scheduler_config() -> SchedulerConfig {
     SchedulerConfig::estimated(timebase())
 }
 
+/// Returns fixed 60 Hz display timing in nanosecond ticks.
+///
+/// Pass it to [`frame_opportunity`] when nothing better is known about the
+/// output: fixed timing is refined from each tick's refresh interval once
+/// two completions establish the cadence. For a variable-refresh output, pass
+/// [`DisplayTiming::variable`] with its range instead.
+#[must_use]
+pub const fn default_display_timing() -> DisplayTiming {
+    DisplayTiming::fixed(Duration::from_nanos(16_666_667, timebase()))
+}
+
 /// Computes [`PresentHints`] from an X11 [`FrameTick`] using
 /// [`default_commit_lead`].
 ///
@@ -141,47 +152,55 @@ pub fn present_hints_with_commit_lead(
     )
 }
 
-/// Returns display timing for an X11 [`FrameTick`].
+/// Returns display timing for an X11 [`FrameTick`] and its target output.
 ///
-/// Prefers [`FrameTick::refresh_interval`] when present (the cadence measured
-/// from consecutive `msc` deltas), falling back to the predicted-present delta
-/// and finally to `fallback_interval`. The Present extension does not expose a
-/// variable-refresh range here, so this always produces fixed-rate timing.
+/// `fallback_timing` describes the output the tick was made for. Pass
+/// [`DisplayTiming::variable`] when the output is variable-refresh capable (its
+/// `vrr_capable` output property) and the window has opted in with
+/// `_VARIABLE_REFRESH`. Present does not report the range, so it comes from the
+/// host, for example from the `EDID` output property. Variable timing is kept
+/// as is, because on such an output the tick's refresh interval is only the
+/// last measured `msc` gap. Fixed timing is refined from the tick:
+/// [`FrameTick::refresh_interval`] first, then the predicted-present delta,
+/// then `fallback_timing`'s interval.
 #[must_use]
-pub fn display_timing(tick: &FrameTick, fallback_interval: Duration) -> DisplayTiming {
-    DisplayTiming::from_tick(tick, fallback_interval)
+pub fn display_timing(tick: &FrameTick, fallback_timing: DisplayTiming) -> DisplayTiming {
+    if fallback_timing.is_variable() {
+        fallback_timing
+    } else {
+        DisplayTiming::from_tick(tick, fallback_timing.min_interval())
+    }
 }
 
 /// Builds a [`FrameOpportunity`] from an X11 Present tick.
 ///
-/// This pairs the estimated/pacing present hints with display timing derived
-/// from the same tick, falling back to `fallback_interval` until a second
-/// completion has established a cadence.
+/// `fallback_timing` describes the tick's output, as for [`display_timing`].
+/// Its fastest interval stands in for the refresh interval until
+/// a second completion has established a cadence.
 #[must_use]
-pub fn frame_opportunity(tick: FrameTick, fallback_interval: Duration) -> FrameOpportunity {
-    let refresh_interval = tick.refresh_interval_or(fallback_interval);
-    frame_opportunity_with_commit_lead(
-        tick,
-        fallback_interval,
-        default_commit_lead(refresh_interval),
-    )
+pub fn frame_opportunity(tick: FrameTick, fallback_timing: DisplayTiming) -> FrameOpportunity {
+    let refresh_interval = tick.refresh_interval_or(fallback_timing.min_interval());
+    frame_opportunity_with_commit_lead(tick, fallback_timing, default_commit_lead(refresh_interval))
 }
 
 /// Builds a [`FrameOpportunity`] with an explicit platform commit lead.
 #[must_use]
 pub fn frame_opportunity_with_commit_lead(
     tick: FrameTick,
-    fallback_interval: Duration,
+    fallback_timing: DisplayTiming,
     commit_lead: Duration,
 ) -> FrameOpportunity {
-    let hints = present_hints_with_commit_lead(&tick, fallback_interval, commit_lead);
-    let display_timing = display_timing(&tick, fallback_interval);
+    let hints = present_hints_with_commit_lead(&tick, fallback_timing.min_interval(), commit_lead);
+    let display_timing = display_timing(&tick, fallback_timing);
     FrameOpportunity::new(tick, hints, display_timing)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{display_timing, frame_opportunity, present_hints, present_hints_with_commit_lead};
+    use super::{
+        default_display_timing, display_timing, frame_opportunity, present_hints,
+        present_hints_with_commit_lead,
+    };
     use frameclock::OutputId;
     use frameclock::timing::PresentationTiming;
     use frameclock::{DisplayTiming, Duration, FrameTick, HostTime};
@@ -245,7 +264,10 @@ mod tests {
     #[test]
     fn display_timing_prefers_reported_refresh_interval() {
         assert_eq!(
-            display_timing(&tick(Some(HostTime(2_000_000))), Duration(8_333_333)),
+            display_timing(
+                &tick(Some(HostTime(2_000_000))),
+                DisplayTiming::fixed(Duration(8_333_333))
+            ),
             DisplayTiming::fixed(Duration(16_666_667))
         );
     }
@@ -253,7 +275,7 @@ mod tests {
     #[test]
     fn frame_opportunity_pairs_tick_hints_and_display_timing() {
         let tick = tick(Some(HostTime(20_000_000)));
-        let opportunity = frame_opportunity(tick, Duration(8_333_333));
+        let opportunity = frame_opportunity(tick, DisplayTiming::fixed(Duration(8_333_333)));
 
         assert_eq!(opportunity.tick, tick);
         assert_eq!(
@@ -268,5 +290,26 @@ mod tests {
             opportunity.display_timing,
             DisplayTiming::fixed(Duration(16_666_667))
         );
+    }
+
+    #[test]
+    fn default_display_timing_is_60_hz() {
+        assert_eq!(
+            default_display_timing(),
+            DisplayTiming::fixed(Duration(16_666_667))
+        );
+    }
+
+    #[test]
+    fn variable_fallback_timing_is_kept() {
+        // A 48-144 Hz variable-refresh range.
+        let variable = DisplayTiming::variable(Duration(6_944_444), Duration(20_833_333), None);
+        let tick = tick(Some(HostTime(20_000_000)));
+        let opportunity = frame_opportunity(tick, variable);
+
+        assert_eq!(display_timing(&tick, variable), variable);
+        assert_eq!(opportunity.display_timing, variable);
+        // The tick's own interval still sets the commit lead.
+        assert_eq!(opportunity.hints, present_hints(&tick, Duration(6_944_444)));
     }
 }

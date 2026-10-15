@@ -53,7 +53,7 @@ and event decoding are the host's; they appear here as comments.
 
 ```rust,ignore
 use frameclock::{
-    Duration, FrameBeginResult, FrameDemand, FrameDriver, FrameReport, FrameSubmission, OutputId,
+    FrameBeginResult, FrameDemand, FrameDriver, FrameReport, FrameSubmission, OutputId,
 };
 use frameclock_wayland::{Clock, PresentEvent, PresentEventQueue, SubmissionId, TickerState};
 
@@ -63,8 +63,8 @@ let mut feedback = PresentEventQueue::default();
 // Switch to `Clock::from_presentation_clock_id` once `wp_presentation`
 // reports its clock.
 let clock = Clock::Monotonic;
-// Host times are nanoseconds. Used until feedback establishes the cadence.
-let fallback_interval = Duration(16_666_667);
+// 60 Hz, refined from the ticks once feedback establishes the cadence.
+let display_timing = frameclock_wayland::default_display_timing();
 // Which frame each commit carried, so its feedback can be reported.
 let mut in_flight: Vec<(SubmissionId, u64)> = Vec::new();
 let mut next_commit = 0;
@@ -80,7 +80,7 @@ ticker.on_callback_done(clock, OutputId(0));
 
 // After dispatch, plan frames for the queued ticks.
 while let Some(tick) = ticker.poll_tick() {
-    let opportunity = frameclock_wayland::frame_opportunity(tick, fallback_interval);
+    let opportunity = frameclock_wayland::frame_opportunity(tick, display_timing);
     if let FrameBeginResult::Ready(frame) = driver.begin_frame(opportunity).result {
         // Render for frame.sample_time(), request wp_presentation feedback,
         // attach the buffer, and commit.
@@ -139,6 +139,16 @@ display timing before passing it to `FrameDriver` or `Scheduler`. Before
 presentation feedback establishes a cadence this produces pacing-only timing;
 after feedback supplies actual-present and refresh-interval facts through
 `TickerState`, the opportunity carries estimated target-present timing.
+
+The `DisplayTiming` passed to `frame_opportunity` describes the output the
+tick was made for; rebuild it when the surface moves to another output or the
+output's mode changes. When the compositor drives the output with adaptive
+sync, pass `DisplayTiming::variable` with the output's range.
+`wp_presentation` reports at most one rate for such an output, one the
+compositor picks (such as the fastest) or none, and no standard protocol
+reports the range, so read it from the output's EDID or the compositor's
+configuration. Variable timing is kept as is; fixed timing is refined from the
+tick.
 
 When the compositor advertises `wp_presentation`, its `clock_id` event names
 the clock domain of all feedback timestamps. Hosts should switch their reads
