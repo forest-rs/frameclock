@@ -162,7 +162,9 @@ pub fn frame_opportunity_with_commit_lead(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frameclock::{FrameBeginResult, FrameDemand, FrameDriver, OutputId};
+    use frameclock::{
+        FrameBeginResult, FrameDemand, FrameDriver, FrameSubmission, FrameWait, OutputId,
+    };
 
     fn test_tick() -> FrameTick {
         FrameTick {
@@ -253,5 +255,60 @@ mod tests {
             };
             assert_eq!(frame.plan().frame_start, test_tick().now);
         }
+    }
+
+    /// Bit `i` is set when callback `i` drew a frame for `demand`.
+    fn frames_drawn(demand: FrameDemand) -> u8 {
+        let mut driver = FrameDriver::new(scheduler_config());
+        let mut drawn = 0_u8;
+        for i in 0..8_u64 {
+            // Callbacks a little off the 60 Hz grid, as browsers deliver them.
+            let now = HostTime(16_000 + i * DEFAULT_REFRESH_INTERVAL.ticks() + i % 3 * 40);
+            let tick = FrameTick { now, ..test_tick() };
+            driver.request(demand);
+            match driver
+                .begin_frame(frame_opportunity(tick, default_display_timing()))
+                .result
+            {
+                FrameBeginResult::Ready(frame) => {
+                    drawn |= 1 << i;
+                    let _ = driver.submit_frame(frame, FrameSubmission::new(now, None));
+                }
+                FrameBeginResult::Wait(FrameWait::NextTick) => {}
+                other => panic!("callback {i} for {demand:?}: {other:?}"),
+            }
+        }
+        drawn
+    }
+
+    #[test]
+    fn consecutive_callbacks_keep_each_demands_cadence() {
+        assert_eq!(frames_drawn(FrameDemand::ANIMATION), 0b1111_1111);
+        // Background work draws every other refresh, not every callback.
+        assert_eq!(frames_drawn(FrameDemand::BACKGROUND), 0b1010_1010);
+    }
+
+    #[test]
+    fn input_is_drawn_at_the_next_callback_after_waiting_background_work() {
+        let mut driver = FrameDriver::new(scheduler_config());
+        driver.request(FrameDemand::BACKGROUND);
+        let first = driver.begin_frame(frame_opportunity(test_tick(), default_display_timing()));
+        assert!(matches!(
+            first.result,
+            FrameBeginResult::Wait(FrameWait::NextTick)
+        ));
+
+        driver.request(FrameDemand::INPUT);
+        let next = FrameTick {
+            now: HostTime(test_tick().now.ticks() + DEFAULT_REFRESH_INTERVAL.ticks()),
+            ..test_tick()
+        };
+        let FrameBeginResult::Ready(frame) = driver
+            .begin_frame(frame_opportunity(next, default_display_timing()))
+            .result
+        else {
+            panic!("input must be drawn at the next callback");
+        };
+        assert!(frame.plan().demand.contains(FrameDemand::INPUT));
     }
 }
