@@ -254,6 +254,55 @@ pub struct FrameTick {
     pub prev_actual_present: Option<HostTime>,
 }
 
+impl FrameTick {
+    /// Returns the tick's refresh interval, or `fallback` when the tick
+    /// reports none or a zero interval.
+    #[inline]
+    #[must_use]
+    pub fn refresh_interval_or(&self, fallback: Duration) -> Duration {
+        self.refresh_interval
+            .filter(|interval| !interval.is_zero())
+            .unwrap_or(fallback)
+    }
+}
+
+/// Returns the default platform commit lead for a refresh interval: a
+/// quarter of it.
+///
+/// A predicted present time describes a refresh slot, not a promise that app
+/// work can be committed at the last possible tick. Platform adapters commit
+/// this far ahead of it so [`PresentHints::latest_commit`] remains a commit
+/// boundary, while the scheduler still owns learned app build margins.
+#[inline]
+#[must_use]
+pub const fn default_commit_lead(refresh_interval: Duration) -> Duration {
+    refresh_interval.div_u64(4)
+}
+
+/// Returns the first refresh at or after `now` on the grid of `last_refresh`.
+///
+/// `last_refresh` is advanced by whole refresh intervals until it reaches
+/// `now`, so a host that was idle for many refreshes still predicts a time on
+/// the display's refresh grid rather than one in the past. A `last_refresh`
+/// at or after `now` is returned as is. Returns `None` for a zero
+/// `refresh_interval` and saturates at `HostTime(u64::MAX)`.
+#[inline]
+#[must_use]
+pub const fn next_refresh(
+    last_refresh: HostTime,
+    refresh_interval: Duration,
+    now: HostTime,
+) -> Option<HostTime> {
+    if refresh_interval.is_zero() {
+        return None;
+    }
+    let elapsed = now.ticks().saturating_sub(last_refresh.ticks());
+    let advance = elapsed
+        .div_ceil(refresh_interval.ticks())
+        .saturating_mul(refresh_interval.ticks());
+    Some(HostTime(last_refresh.ticks().saturating_add(advance)))
+}
+
 /// Platform frame facts passed to the scheduler or retained driver.
 ///
 /// Hosts construct this from the current display/frame callback. It packages
@@ -460,6 +509,50 @@ impl PresentHints {
     #[must_use]
     pub const fn pacing_only(latest_commit: HostTime) -> Self {
         Self::new(PresentationTiming::PacingOnly, None, latest_commit)
+    }
+
+    /// Computes hints for a platform tick, committing `commit_lead` ahead of
+    /// the frame's present.
+    ///
+    /// A [`FrameTick::predicted_present`] at or after `tick.now` becomes the
+    /// desired present, interpreted as `presentation_timing`. A missing or
+    /// stale prediction, or [`PresentationTiming::PacingOnly`], gives
+    /// pacing-only hints aimed one refresh after `tick.now`, using
+    /// `fallback_refresh_interval` when the tick has no refresh interval.
+    /// The commit boundary is never before `tick.now`.
+    ///
+    /// Platform adapters use this with the [`PresentationTiming`] their
+    /// predictions deserve, usually with [`default_commit_lead`].
+    #[must_use]
+    pub fn for_tick(
+        tick: &FrameTick,
+        presentation_timing: PresentationTiming,
+        fallback_refresh_interval: Duration,
+        commit_lead: Duration,
+    ) -> Self {
+        let commit_boundary = |present: HostTime| {
+            present
+                .checked_sub(commit_lead)
+                .unwrap_or(tick.now)
+                .max(tick.now)
+        };
+        if presentation_timing.has_target_present()
+            && let Some(predicted_present) = tick
+                .predicted_present
+                .filter(|predicted_present| *predicted_present >= tick.now)
+        {
+            return Self::new(
+                presentation_timing,
+                Some(predicted_present),
+                commit_boundary(predicted_present),
+            );
+        }
+
+        let pacing_target = tick
+            .now
+            .checked_add(tick.refresh_interval_or(fallback_refresh_interval))
+            .unwrap_or(HostTime(u64::MAX));
+        Self::pacing_only(commit_boundary(pacing_target))
     }
 
     /// Creates feedback hints normalized to an executed [`FramePlan`].
@@ -731,6 +824,131 @@ impl PendingFeedback {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tick_at(now: u64, predicted_present: Option<u64>) -> FrameTick {
+        FrameTick {
+            now: HostTime(now),
+            predicted_present: predicted_present.map(HostTime),
+            refresh_interval: Some(Duration(16_666_667)),
+            output: OutputId(0),
+            prev_actual_present: None,
+        }
+    }
+
+    #[test]
+    fn refresh_interval_or_skips_missing_and_zero_intervals() {
+        let fallback = Duration(8_333_333);
+        let tick = tick_at(0, None);
+        assert_eq!(tick.refresh_interval_or(fallback), Duration(16_666_667));
+        for refresh_interval in [None, Some(Duration::ZERO)] {
+            let tick = FrameTick {
+                refresh_interval,
+                ..tick
+            };
+            assert_eq!(tick.refresh_interval_or(fallback), fallback);
+        }
+    }
+
+    #[test]
+    fn default_commit_lead_is_a_quarter_refresh() {
+        assert_eq!(
+            default_commit_lead(Duration(16_666_667)),
+            Duration(4_166_666)
+        );
+    }
+
+    #[test]
+    fn next_refresh_rounds_up_to_the_grid() {
+        // 1000 + 4 * 160 = 1640 is the first refresh at or after 1500.
+        assert_eq!(
+            next_refresh(HostTime(1000), Duration(160), HostTime(1500)),
+            Some(HostTime(1640))
+        );
+        // 1000 + 3 * 160 lands exactly on `now`.
+        assert_eq!(
+            next_refresh(HostTime(1000), Duration(160), HostTime(1480)),
+            Some(HostTime(1480))
+        );
+        // A refresh already at or after `now` is the next one.
+        assert_eq!(
+            next_refresh(HostTime(2000), Duration(160), HostTime(1500)),
+            Some(HostTime(2000))
+        );
+    }
+
+    #[test]
+    fn next_refresh_needs_an_interval_and_saturates() {
+        assert_eq!(
+            next_refresh(HostTime(1000), Duration::ZERO, HostTime(1500)),
+            None
+        );
+        assert_eq!(
+            next_refresh(
+                HostTime(u64::MAX - 100_000),
+                Duration(166_666),
+                HostTime(u64::MAX - 10)
+            ),
+            Some(HostTime(u64::MAX))
+        );
+    }
+
+    #[test]
+    fn hints_for_tick_commit_ahead_of_a_fresh_prediction() {
+        let tick = tick_at(1_000_000, Some(20_000_000));
+        let hints = PresentHints::for_tick(
+            &tick,
+            PresentationTiming::Estimated,
+            Duration(16_666_667),
+            Duration(2_000_000),
+        );
+
+        assert_eq!(hints.presentation_timing(), PresentationTiming::Estimated);
+        assert_eq!(hints.desired_present(), Some(HostTime(20_000_000)));
+        assert_eq!(hints.latest_commit(), HostTime(18_000_000));
+    }
+
+    #[test]
+    fn hints_for_tick_pace_without_a_fresh_prediction() {
+        let lead = Duration(4_166_666);
+        for tick in [tick_at(1_000_000, None), tick_at(1_000_000, Some(900_000))] {
+            let hints = PresentHints::for_tick(
+                &tick,
+                PresentationTiming::Predictive,
+                Duration(8_333_333),
+                lead,
+            );
+
+            assert_eq!(hints.presentation_timing(), PresentationTiming::PacingOnly);
+            assert_eq!(hints.desired_present(), None);
+            assert_eq!(hints.latest_commit(), HostTime(13_500_001));
+        }
+    }
+
+    #[test]
+    fn pacing_only_hints_for_tick_ignore_a_prediction() {
+        let tick = tick_at(1_000_000, Some(20_000_000));
+        let hints = PresentHints::for_tick(
+            &tick,
+            PresentationTiming::PacingOnly,
+            Duration(16_666_667),
+            Duration::ZERO,
+        );
+
+        assert_eq!(hints, PresentHints::pacing_only(HostTime(17_666_667)));
+    }
+
+    #[test]
+    fn hints_for_tick_never_commit_before_now() {
+        let tick = tick_at(1_000_000, Some(2_000_000));
+        let hints = PresentHints::for_tick(
+            &tick,
+            PresentationTiming::Predictive,
+            Duration(16_666_667),
+            Duration(5_000_000),
+        );
+
+        assert_eq!(hints.latest_commit(), HostTime(1_000_000));
+    }
 
     fn plan_with_hints(hints: PresentHints) -> FramePlan {
         FramePlan {
