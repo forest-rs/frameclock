@@ -25,8 +25,10 @@ VSync-paced tick                                    -> make_tick      -> FrameTi
 Use `now` and `timebase` to read the QPC clock as a `HostTime` /
 `Timebase` pair (`nanos = ticks * timebase.numer() / timebase.denom()`). Call
 `make_tick` from a `VSync`-paced tick handler (for example, one driven by
-`DwmFlush` or a swapchain frame-latency waitable) to build a `FrameTick` from
-the refresh interval and previous actual present time.
+`DwmFlush` or a swapchain frame-latency waitable) to build a `FrameTick` for an
+output from the refresh interval and previous actual present time, both in QPC
+ticks. `DWM_TIMING_INFO::qpcRefreshPeriod` is already in QPC ticks; convert a
+nanosecond interval with `Duration::from_nanos(nanos, timebase())`.
 
 ## Timing Model
 
