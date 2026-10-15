@@ -102,6 +102,25 @@ const DEFAULT_FRAME_START_MARGIN_NANOS: u64 = 1_000_000;
 /// The default pacing-only [`SchedulerConfig::nominal_latency`]: 16 ms.
 const DEFAULT_PACING_LATENCY_NANOS: u64 = 16_000_000;
 
+/// The start of a frame that may only start at a tick.
+///
+/// A frame due at the next refresh starts at this tick. One the cadence
+/// holds back by whole refreshes starts half a refresh before the tick that
+/// precedes its refresh, so that tick releases it despite delivery jitter
+/// and the ticks in between do not.
+fn tick_aligned_start(
+    now: HostTime,
+    frame_interval: Duration,
+    source_interval: Duration,
+) -> HostTime {
+    let held_back = frame_interval.saturating_sub(source_interval);
+    if held_back.is_zero() {
+        return now;
+    }
+    now.checked_add(held_back.saturating_sub(source_interval.div_u64(2)))
+        .unwrap_or(now)
+}
+
 /// The slowest fastest-refresh interval a real display has: 4 Hz. Display
 /// timing slower than this is almost certainly nanoseconds passed as ticks.
 const MAX_PLAUSIBLE_REFRESH_NANOS: u64 = 250_000_000;
@@ -446,7 +465,11 @@ impl Scheduler {
         FramePlan {
             demand,
             frame_interval,
-            frame_start: self.frame_start(tick.now, commit_deadline, demand),
+            frame_start: if hints.starts_at_tick() {
+                tick_aligned_start(tick.now, frame_interval, source_interval)
+            } else {
+                self.frame_start(tick.now, commit_deadline, demand)
+            },
             sample_time,
             target_present,
             presentation_timing,
@@ -1075,6 +1098,46 @@ mod tests {
         );
 
         assert_eq!(plan.frame_start, HostTime(1_500));
+    }
+
+    #[test]
+    fn hints_starting_at_tick_start_the_frame_at_the_tick() {
+        let mut config = SchedulerConfig::pacing_only(Timebase::NANOS);
+        config.minimum_frame_start_margin = Duration(250);
+        let mut sched = Scheduler::new(config);
+        let mut opportunity = make_opportunity(PresentationTiming::PacingOnly, 1_000, None, 9_000);
+
+        let plan = sched.plan(opportunity, FrameDemand::ANIMATION, 0);
+        assert_eq!(plan.frame_start, HostTime(8_750));
+
+        opportunity.hints = opportunity.hints.starting_at_tick();
+        let plan = sched.plan(opportunity, FrameDemand::ANIMATION, 1);
+        assert_eq!(plan.frame_start, HostTime(1_000));
+        assert_eq!(plan.commit_deadline, HostTime(9_000));
+    }
+
+    #[test]
+    fn hints_starting_at_tick_keep_a_slower_cadence() {
+        let mut sched = Scheduler::new(SchedulerConfig::pacing_only(Timebase::NANOS));
+        let mut opportunity = make_opportunity(PresentationTiming::PacingOnly, 1_000, None, 9_000);
+        opportunity.hints = opportunity.hints.starting_at_tick();
+
+        // Background work runs every other refresh, so its frame waits for
+        // the next tick: half a refresh before it.
+        let plan = sched.plan(opportunity, FrameDemand::BACKGROUND, 0);
+        assert_eq!(plan.frame_interval, REFRESH_INTERVAL.saturating_mul(2));
+        assert_eq!(
+            plan.frame_start,
+            HostTime(1_000 + REFRESH_INTERVAL.ticks() - REFRESH_INTERVAL.ticks() / 2)
+        );
+        assert_eq!(
+            plan.commit_deadline,
+            HostTime(9_000 + REFRESH_INTERVAL.ticks())
+        );
+
+        // Input still starts at the tick that offered it.
+        let plan = sched.plan(opportunity, FrameDemand::INPUT, 1);
+        assert_eq!(plan.frame_start, HostTime(1_000));
     }
 
     #[test]

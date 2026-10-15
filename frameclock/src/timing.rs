@@ -387,7 +387,11 @@ pub struct FramePlan {
     ///
     /// This is derived from the commit deadline and scheduler safety margin.
     /// It is clamped to the originating tick time, so callers can request
-    /// redraw immediately when this time is already due.
+    /// redraw immediately when this time is already due. Input frames start
+    /// at the tick time. Frames whose hints
+    /// [start at a tick](PresentHints::starting_at_tick) start at the tick
+    /// time, or half a refresh before the later tick that the selected
+    /// cadence waits for.
     pub frame_start: HostTime,
     /// Time applications should sample animation and simulation state for.
     pub sample_time: HostTime,
@@ -434,6 +438,8 @@ pub struct PresentHints {
     desired_present: Option<HostTime>,
     /// Latest time by which a commit must occur to hit the desired present.
     latest_commit: HostTime,
+    /// Whether frame work must start at the tick that offered it.
+    starts_at_tick: bool,
 }
 
 impl PresentHints {
@@ -458,6 +464,7 @@ impl PresentHints {
             presentation_timing,
             desired_present,
             latest_commit,
+            starts_at_tick: false,
         }
     }
 
@@ -480,6 +487,35 @@ impl PresentHints {
     #[must_use]
     pub const fn latest_commit(self) -> HostTime {
         self.latest_commit
+    }
+
+    /// Returns these hints with frame work required to start at a tick.
+    ///
+    /// Use this when the host starts frame work only from its frame
+    /// callback: a browser shows only what is drawn during
+    /// `requestAnimationFrame`, and a host without its own timer has no
+    /// other place to start. The scheduler then plans
+    /// [`FramePlan::frame_start`] at the tick that offered the hints when
+    /// the frame is due at the next refresh. A frame the selected cadence
+    /// holds back, such as background work every other refresh, starts at
+    /// the later tick before its refresh: its plan returns
+    /// [`WaitUntil`](crate::FrameBeginResult::WaitUntil) until a tick at or
+    /// after its start, so the host calls
+    /// [`FrameDriver::begin_frame`](crate::FrameDriver::begin_frame) from
+    /// each callback.
+    #[inline]
+    #[must_use]
+    pub const fn starting_at_tick(mut self) -> Self {
+        self.starts_at_tick = true;
+        self
+    }
+
+    /// Returns whether frame work must start at the tick that offered these
+    /// hints. See [`starting_at_tick`](Self::starting_at_tick).
+    #[inline]
+    #[must_use]
+    pub const fn starts_at_tick(self) -> bool {
+        self.starts_at_tick
     }
 
     /// Creates predictive present hints.
