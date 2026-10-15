@@ -75,8 +75,9 @@ impl Default for TickQueue {
 /// [`set_last_observed_actual_present`](Self::set_last_observed_actual_present))
 /// and the most-recent observed refresh interval (see
 /// [`set_last_observed_refresh_interval`](Self::set_last_observed_refresh_interval)).
-/// It stamps the actual-present time onto the next tick's
-/// [`FrameTick::prev_actual_present`], and when both facts are known it predicts
+/// It stamps each newly observed actual-present time onto the next tick's
+/// [`FrameTick::prev_actual_present`] once; later ticks carry `None` until
+/// another present is observed. When both facts are known it predicts
 /// the next vsync at or after the tick time and emits it as
 /// [`FrameTick::predicted_present`] alongside the [`FrameTick::refresh_interval`].
 /// Feed
@@ -92,6 +93,9 @@ pub struct TickerState {
     queue: TickQueue,
     callback_in_flight: bool,
     last_observed_actual_present: Option<HostTime>,
+    /// Whether [`Self::last_observed_actual_present`] has not yet been
+    /// reported on a tick.
+    actual_present_unreported: bool,
     last_observed_refresh_interval: Option<Duration>,
 }
 
@@ -103,6 +107,7 @@ impl TickerState {
             queue: TickQueue::default(),
             callback_in_flight: false,
             last_observed_actual_present: None,
+            actual_present_unreported: false,
             last_observed_refresh_interval: None,
         }
     }
@@ -134,13 +139,17 @@ impl TickerState {
         let last_actual = self.last_observed_actual_present;
         let refresh_interval = self.last_observed_refresh_interval;
         let predicted_present = predict_next_present(last_actual, refresh_interval, now);
+        // A present is news once. Repeating it on every later tick would
+        // claim it for frames submitted after it.
+        let prev_actual_present = last_actual.filter(|_| self.actual_present_unreported);
+        self.actual_present_unreported = false;
 
         let tick = FrameTick {
             now,
             predicted_present,
             refresh_interval,
             output,
-            prev_actual_present: last_actual,
+            prev_actual_present,
         };
 
         self.queue.push(tick);
@@ -179,10 +188,14 @@ impl TickerState {
     /// Stores the most recent actual present time for propagation into the
     /// next [`FrameTick::prev_actual_present`].
     ///
+    /// Only the next tick reports it. It stays the baseline for
+    /// [`FrameTick::predicted_present`] until a newer present replaces it.
+    ///
     /// Feed this only with presentation feedback for the same surface/output
     /// stream this ticker paces (see the [type-level contract](Self#one-stream-per-surface)).
     pub fn set_last_observed_actual_present(&mut self, t: HostTime) {
         self.last_observed_actual_present = Some(t);
+        self.actual_present_unreported = true;
     }
 
     /// Stores the most recent observed refresh interval (in host ticks) for
@@ -369,6 +382,28 @@ mod tests {
         ticker.on_callback_done(Clock::Monotonic, OutputId(0));
         let tick1 = ticker.poll_tick().unwrap();
         assert_eq!(tick1.prev_actual_present, Some(HostTime(42_000)));
+
+        // Third tick: nothing new was presented, so nothing is reported.
+        assert!(ticker.mark_callback_requested());
+        ticker.on_callback_done(Clock::Monotonic, OutputId(0));
+        let tick2 = ticker.poll_tick().unwrap();
+        assert_eq!(tick2.prev_actual_present, None);
+    }
+
+    #[test]
+    fn an_unreported_present_still_predicts_later_ticks() {
+        let mut ticker = TickerState::new();
+        ticker.set_last_observed_actual_present(HostTime(1000));
+        ticker.set_last_observed_refresh_interval(Duration(160));
+        assert!(ticker.mark_callback_requested());
+        ticker.on_callback_done(Clock::Monotonic, OutputId(0));
+        _ = ticker.poll_tick();
+
+        assert!(ticker.mark_callback_requested());
+        ticker.on_callback_done(Clock::Monotonic, OutputId(0));
+        let tick = ticker.poll_tick().unwrap();
+        assert_eq!(tick.prev_actual_present, None);
+        assert!(tick.predicted_present.is_some());
     }
 
     #[test]

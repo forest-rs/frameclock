@@ -39,7 +39,7 @@ and correlate feedback to the right stream by `SubmissionId` themselves.
 Use `presentation_time_to_host_time` to convert
 `wp_presentation_feedback.presented` timestamps, store the most recent value
 via `TickerState::set_last_observed_actual_present` so the next tick carries
-`FrameTick::prev_actual_present`, and queue per-commit `PresentEvent`s in a
+`FrameTick::prev_actual_present` once, and queue per-commit `PresentEvent`s in a
 `PresentEventQueue` correlated by `SubmissionId`.
 
 Use `Clock::from_presentation_clock_id` to map the `wp_presentation.clock_id`
