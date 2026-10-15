@@ -12,12 +12,7 @@ categories = ["os::macos-apis", "rendering::engine"]
 
 [features]
 default = ["ca-display-link"]
-cv-display-link = [
-  "dep:objc2-core-video",
-  "dep:dispatch2",
-  "dispatch2/alloc",
-  "dispatch2/objc2",
-]
+cv-display-link = ["dep:objc2-core-video", "dispatch2/objc2"]
 ca-display-link = [
   "objc2-quartz-core/CADisplayLink",
   "objc2-quartz-core/CAFrameRateRange",
@@ -50,6 +45,4 @@ objc2-core-video = { version = "0.3", optional = true, default-features = false,
   "CVReturn",
   "CVHostTime",
 ] }
-dispatch2 = { version = "0.3", optional = true, default-features = false, features = [
-  "alloc",
-] }
+dispatch2 = { version = "0.3", default-features = false, features = ["alloc"] }

@@ -96,6 +96,8 @@ The root module exposes the Apple integration surface:
 
 - `CaDisplayLink` and `CvDisplayLink` for the enabled display-link sources.
 - `now` and `timebase` for Mach host-time conversion.
+- `wake_at` for a main-thread wake at a host time, for hosts that start
+  frames when planned.
 - `scheduler_config` and `default_display_timing` for the `SchedulerConfig`
   and fallback `DisplayTiming` that match these ticks.
 - `present_hints`, `display_timing`, and `frame_opportunity` for hosts that own
@@ -145,12 +147,46 @@ planning; it is not baked into Apple platform hints.
 The hints start each frame at a display-link tick, so the callback is handed
 ready frames and never has to wake itself. A frame the cadence holds back, such
 as background work every other refresh, returns `Wait(FrameWait::NextTick)` and
-is ready at the later tick it waits for. A host with its own timer can start
-frames nearer their deadline, so they sample fresher input: mark the
-opportunity's hints `starting_when_planned`, wake at the time
-`Wait(FrameWait::Until(time))` gives, and call
-`FrameDriver::begin_pending_frame`. Pause the display link while
+is ready at the later tick it waits for. Pause the display link while
 `FrameDriver::needs_tick` is false.
+
+A host can start frames nearer their deadline instead, so they sample fresher
+input, by waking itself. Mark the opportunity's hints `starting_when_planned`,
+and wake with `wake_at` at the time `Wait(FrameWait::Until(time))` gives:
+
+```rust,ignore
+use std::{cell::RefCell, rc::Rc};
+
+use frameclock::{FrameBeginResult, FrameWait};
+use frameclock_apple::CaDisplayLink;
+
+// `driver` is an `Rc<RefCell<FrameDriver>>` shared with the wake. Take each
+// result out of the borrow before matching on it, so the arms can borrow the
+// driver again.
+let mut opportunity = frameclock_apple::frame_opportunity(tick, display_timing);
+opportunity.hints = opportunity.hints.starting_when_planned();
+let result = driver.borrow_mut().begin_frame(opportunity).result;
+if let FrameBeginResult::Wait(FrameWait::Until(at)) = result {
+    let driver = Rc::clone(&driver);
+    frameclock_apple::wake_at(at, mtm, move || {
+        let now = frameclock_apple::now();
+        let result = driver.borrow_mut().begin_pending_frame(now);
+        if let FrameBeginResult::Ready(frame) = result {
+            // Render for frame.sample_time(), then submit it.
+            let submission = CaDisplayLink::FEEDBACK_MODE.submission(frameclock_apple::now());
+            let _ = driver.borrow_mut().submit_frame(frame, submission);
+        }
+    });
+}
+```
+
+`wake_at` runs its closure on the main thread, so the closure can own
+main-thread state, which `DispatchQueue::after` does not allow. It uses a
+strict dispatch timer with no leeway: on a 120 Hz Mac it fired a median of
+under 0.1 ms late, where `DispatchQueue::after` fired about a millisecond late
+over a few milliseconds. The driver learns how late wakes come and starts
+frames that much earlier; run live, frames started about 5 ms after each 120 Hz
+tick and none of 120 expired.
 
 Presentation feedback lifecycle is host-owned, while feedback capability comes
 from the Apple display-link source. Use the source's `FEEDBACK_MODE`, such as
