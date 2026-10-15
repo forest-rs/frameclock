@@ -499,7 +499,7 @@ impl PresentHints {
     /// the frame is due at the next refresh. A frame the selected cadence
     /// holds back, such as background work every other refresh, starts at
     /// the later tick before its refresh: its plan returns
-    /// [`WaitUntil`](crate::FrameBeginResult::WaitUntil) until a tick at or
+    /// [`FrameWait::NextTick`](crate::FrameWait::NextTick) until a tick at or
     /// after its start, so the host calls
     /// [`FrameDriver::begin_frame`](crate::FrameDriver::begin_frame) from
     /// each callback.
@@ -514,8 +514,8 @@ impl PresentHints {
     /// plans it, which may fall between ticks.
     ///
     /// This is the default for [`PresentHints::new`]. A host that wakes
-    /// itself at the time [`WaitUntil`](crate::FrameBeginResult::WaitUntil)
-    /// returns, and then calls
+    /// itself at the time [`FrameWait::Until`](crate::FrameWait::Until) gives,
+    /// and then calls
     /// [`FrameDriver::begin_pending_frame`](crate::FrameDriver::begin_pending_frame),
     /// can use it on hints a platform adapter marked
     /// [`starting_at_tick`](Self::starting_at_tick): frames then start as late

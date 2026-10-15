@@ -42,6 +42,15 @@ pub struct PlannedFrame {
 }
 
 impl PlannedFrame {
+    /// What releases this frame before its start.
+    const fn wait(&self) -> FrameWait {
+        if self.hints.starts_at_tick() {
+            FrameWait::NextTick
+        } else {
+            FrameWait::Until(self.plan.frame_start)
+        }
+    }
+
     /// Creates a planned frame from a [`FrameTick`], [`FramePlan`], and
     /// matching [`PresentHints`].
     ///
@@ -324,11 +333,11 @@ impl FrameSubmitResult {
 pub enum FrameBeginResult {
     /// No demand or queued frame is waiting.
     Idle,
-    /// A frame has been planned, but its selected start time has not arrived.
+    /// A frame has been planned, but its start has not arrived.
     ///
-    /// Hosts should mirror this time into their event-loop or timer queue and
-    /// call [`FrameDriver::begin_frame`] again from the wake/redraw path.
-    WaitUntil(HostTime),
+    /// [`FrameWait`] says what releases it: a later tick, or a host wake at a
+    /// given time.
+    Wait(FrameWait),
     /// A planned frame is ready for application update and rendering.
     ///
     /// Prepare the frame, then pass this [`ActiveFrame`] to
@@ -336,10 +345,31 @@ pub enum FrameBeginResult {
     Ready(ActiveFrame),
     /// A queued frame missed its commit deadline before the host released it.
     ///
-    /// The driver has dropped the planned frame without feeding scheduler
-    /// feedback. Hosts should record the summary and request fresh demand if
-    /// the work is still needed.
+    /// The driver has dropped the planned frame without feeding build or
+    /// presentation feedback; only a late wake teaches the scheduler, through
+    /// [`Scheduler::observe_wake`]. Hosts should record the summary and
+    /// request fresh demand if the work is still needed.
     Expired(FrameTimingSummary),
+}
+
+/// What releases a planned frame whose start has not arrived.
+///
+/// Returned in [`FrameBeginResult::Wait`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FrameWait {
+    /// A later tick starts the frame.
+    ///
+    /// Its hints [start frames at a tick](crate::PresentHints::starting_at_tick)
+    /// and the cadence holds it back. Call [`FrameDriver::begin_frame`] from
+    /// the next frame callback as usual, and keep callbacks coming while
+    /// [`FrameDriver::needs_tick`] is true. There is no time to wake at.
+    NextTick,
+    /// The host starts the frame by waking at this time.
+    ///
+    /// Its hints start frames [when planned](crate::PresentHints::starting_when_planned).
+    /// Mirror the time into the host's timer queue and call
+    /// [`FrameDriver::begin_pending_frame`] when it fires.
+    Until(HostTime),
 }
 
 /// Result returned by [`FrameDriver::begin_frame`].
@@ -358,7 +388,7 @@ pub struct FrameBegin {
 
 enum DriverBeginResult {
     Idle,
-    WaitUntil(HostTime),
+    Wait(FrameWait),
     Ready(PlannedFrame),
     Expired(PlannedFrame),
 }
@@ -369,7 +399,7 @@ enum DriverBeginResult {
 /// [`request`](Self::request) when app-visible frame demand arrives, then call
 /// [`begin_frame`](Self::begin_frame) from a platform redraw/tick
 /// opportunity. If the scheduler chooses a future [`FramePlan::frame_start`],
-/// the driver keeps that plan queued and returns [`FrameBeginResult::WaitUntil`].
+/// the driver keeps that plan queued and returns [`FrameBeginResult::Wait`].
 ///
 /// Submit completed frames with [`submit_frame`](Self::submit_frame) so
 /// `frameclock` can observe feedback and produce the frame timing summary.
@@ -383,9 +413,9 @@ enum DriverBeginResult {
 /// 2. Call [`begin_frame`](Self::begin_frame) from a redraw/tick
 ///    opportunity. Record [`FrameBegin::resolved_feedback`] if it is
 ///    present; this is the summary for a previous deferred submission.
-/// 3. Inspect [`FrameBegin::result`]. If it is
-///    [`FrameBeginResult::WaitUntil`], mirror that time into the host timer
-///    queue and sleep. If it is [`FrameBeginResult::Expired`], record the
+/// 3. Inspect [`FrameBegin::result`]. If it is [`FrameBeginResult::Wait`],
+///    the [`FrameWait`] says whether a later tick or a host wake starts the
+///    frame. If it is [`FrameBeginResult::Expired`], record the
 ///    returned drop summary and request fresh demand if the work is still
 ///    needed. If it is [`FrameBeginResult::Idle`], wait for more demand.
 /// 4. If it is [`FrameBeginResult::Ready`], sample app state at
@@ -565,8 +595,7 @@ impl FrameDriver {
     /// opportunity into frame work. It is the preferred public method that
     /// consumes pending demand into a ready frame. If the selected frame start
     /// is still in the future, this stores the planned frame internally and
-    /// returns [`FrameBeginResult::WaitUntil`] with the wake time the host
-    /// should mirror into its timer queue.
+    /// returns [`FrameBeginResult::Wait`] with what will release it.
     ///
     /// When a queued frame becomes ready before its commit deadline, the
     /// returned [`ActiveFrame`] carries the original planning tick and plan. Its
@@ -590,13 +619,13 @@ impl FrameDriver {
     ///
     /// A host whose hints start frames
     /// [when planned](crate::PresentHints::starting_when_planned) wakes
-    /// itself at the time [`FrameBeginResult::WaitUntil`] returned and calls
-    /// this with the current host time. The queued frame is then
+    /// itself at the time [`FrameWait::Until`] gave and calls this with the
+    /// current host time. The queued frame is then
     /// [`Ready`](FrameBeginResult::Ready), or
     /// [`Expired`](FrameBeginResult::Expired) if the wake came after its
-    /// commit deadline. This returns [`WaitUntil`](FrameBeginResult::WaitUntil)
-    /// again if `now` is still early, and [`Idle`](FrameBeginResult::Idle)
-    /// when no frame is queued. It plans no new frame: pending demand waits
+    /// commit deadline. This returns [`Wait`](FrameBeginResult::Wait) again
+    /// if `now` is still early, and [`Idle`](FrameBeginResult::Idle) when no
+    /// frame is queued. It plans no new frame: pending demand waits
     /// for the next [`begin_frame`](Self::begin_frame).
     #[must_use]
     pub fn begin_pending_frame(&mut self, now: HostTime) -> FrameBeginResult {
@@ -607,7 +636,7 @@ impl FrameDriver {
     fn begin_result(&mut self, result: DriverBeginResult, now: HostTime) -> FrameBeginResult {
         match result {
             DriverBeginResult::Idle => FrameBeginResult::Idle,
-            DriverBeginResult::WaitUntil(frame_start) => FrameBeginResult::WaitUntil(frame_start),
+            DriverBeginResult::Wait(wait) => FrameBeginResult::Wait(wait),
             DriverBeginResult::Ready(frame) => {
                 FrameBeginResult::Ready(ActiveFrame::new(frame, now))
             }
@@ -877,7 +906,7 @@ impl FrameDriver {
     fn take_pending(&mut self, now: HostTime) -> Option<DriverBeginResult> {
         let frame = self.pending_frame?;
         if now < frame.plan.frame_start {
-            return Some(DriverBeginResult::WaitUntil(frame.plan.frame_start));
+            return Some(DriverBeginResult::Wait(frame.wait()));
         }
 
         self.pending_frame = None;
@@ -916,9 +945,8 @@ impl FrameDriver {
             self.scheduler.safety_margin_ticks(),
         );
         if tick.now < frame.plan.frame_start {
-            let frame_start = frame.plan.frame_start;
             self.pending_frame = Some(frame);
-            DriverBeginResult::WaitUntil(frame_start)
+            DriverBeginResult::Wait(frame.wait())
         } else if tick.now > frame.plan.commit_deadline {
             let frame = self.consume_frame_index(frame);
             DriverBeginResult::Expired(frame)
@@ -1080,12 +1108,12 @@ mod tests {
 
         assert!(matches!(
             begin_at(&mut driver, 0),
-            FrameBeginResult::WaitUntil(HostTime(90))
+            FrameBeginResult::Wait(FrameWait::Until(HostTime(90)))
         ));
         assert_eq!(driver.next_frame_start(), Some(HostTime(90)));
         assert!(matches!(
             begin_at(&mut driver, 89),
-            FrameBeginResult::WaitUntil(HostTime(90))
+            FrameBeginResult::Wait(FrameWait::Until(HostTime(90)))
         ));
 
         let frame = ready_at(&mut driver, 90);
@@ -1104,7 +1132,7 @@ mod tests {
         driver.request(FrameDemand::ANIMATION);
         assert!(matches!(
             begin_at(&mut driver, 0),
-            FrameBeginResult::WaitUntil(HostTime(90))
+            FrameBeginResult::Wait(FrameWait::Until(HostTime(90)))
         ));
 
         let frame = ready_at(&mut driver, 90);
@@ -1133,7 +1161,7 @@ mod tests {
         driver.request(FrameDemand::ANIMATION);
         assert!(matches!(
             begin_at(&mut driver, 0),
-            FrameBeginResult::WaitUntil(HostTime(90))
+            FrameBeginResult::Wait(FrameWait::Until(HostTime(90)))
         ));
         let state_before = driver.scheduler().state();
 
@@ -1166,7 +1194,7 @@ mod tests {
         driver.request(FrameDemand::ANIMATION);
         assert!(matches!(
             begin_at(&mut driver, 0),
-            FrameBeginResult::WaitUntil(HostTime(90))
+            FrameBeginResult::Wait(FrameWait::Until(HostTime(90)))
         ));
 
         assert!(matches!(
@@ -1182,7 +1210,7 @@ mod tests {
         driver.request(FrameDemand::ANIMATION);
         assert!(matches!(
             begin_at(&mut driver, 0),
-            FrameBeginResult::WaitUntil(HostTime(90))
+            FrameBeginResult::Wait(FrameWait::Until(HostTime(90)))
         ));
         assert_eq!(driver.next_frame_start(), Some(HostTime(90)));
 
@@ -1202,7 +1230,7 @@ mod tests {
         driver.request(FrameDemand::ANIMATION);
         assert!(matches!(
             begin_at(&mut driver, 0),
-            FrameBeginResult::WaitUntil(HostTime(90))
+            FrameBeginResult::Wait(FrameWait::Until(HostTime(90)))
         ));
 
         driver.request(FrameDemand::INPUT);
@@ -1219,7 +1247,7 @@ mod tests {
         driver.request(FrameDemand::ANIMATION);
         assert!(matches!(
             begin_at(&mut driver, 0),
-            FrameBeginResult::WaitUntil(HostTime(90))
+            FrameBeginResult::Wait(FrameWait::Until(HostTime(90)))
         ));
 
         driver.request(FrameDemand::BACKGROUND);
@@ -1234,7 +1262,7 @@ mod tests {
 
         assert!(matches!(
             begin_at(&mut driver, 90),
-            FrameBeginResult::WaitUntil(HostTime(280))
+            FrameBeginResult::Wait(FrameWait::Until(HostTime(280)))
         ));
         assert_eq!(driver.next_frame_start(), Some(HostTime(280)));
     }
@@ -1245,7 +1273,7 @@ mod tests {
         driver.request(FrameDemand::ANIMATION);
         assert!(matches!(
             begin_at(&mut driver, 0),
-            FrameBeginResult::WaitUntil(HostTime(90))
+            FrameBeginResult::Wait(FrameWait::Until(HostTime(90)))
         ));
 
         driver.request(FrameDemand::ANIMATION);
@@ -1261,7 +1289,7 @@ mod tests {
         driver.request(FrameDemand::ANIMATION);
         assert!(matches!(
             begin_at(&mut driver, 0),
-            FrameBeginResult::WaitUntil(HostTime(90))
+            FrameBeginResult::Wait(FrameWait::Until(HostTime(90)))
         ));
         driver.request(FrameDemand::BACKGROUND);
 
@@ -1277,7 +1305,7 @@ mod tests {
         driver.request(FrameDemand::ANIMATION);
         assert!(matches!(
             begin_at(&mut driver, 0),
-            FrameBeginResult::WaitUntil(HostTime(90))
+            FrameBeginResult::Wait(FrameWait::Until(HostTime(90)))
         ));
 
         assert!(driver.clear_pending_frame());
@@ -1294,7 +1322,7 @@ mod tests {
         driver.request(FrameDemand::ANIMATION);
         assert!(matches!(
             begin_at(&mut driver, 0),
-            FrameBeginResult::WaitUntil(HostTime(90))
+            FrameBeginResult::Wait(FrameWait::Until(HostTime(90)))
         ));
 
         driver.request(FrameDemand::BACKGROUND);
@@ -1377,7 +1405,7 @@ mod tests {
         driver.request(FrameDemand::ANIMATION);
         assert!(matches!(
             begin_at(&mut driver, 0),
-            FrameBeginResult::WaitUntil(HostTime(90))
+            FrameBeginResult::Wait(FrameWait::Until(HostTime(90)))
         ));
 
         driver.request(FrameDemand::BACKGROUND);
@@ -1779,7 +1807,7 @@ mod tests {
             driver
                 .begin_frame(predictive_opportunity(0, 4, 100, 90))
                 .result,
-            FrameBeginResult::WaitUntil(HostTime(190))
+            FrameBeginResult::Wait(FrameWait::Until(HostTime(190)))
         ));
 
         let FrameBeginResult::Ready(frame) = driver
@@ -1838,7 +1866,7 @@ mod tests {
                     let _ =
                         driver.submit_frame(frame, FrameSubmission::new(HostTime(now + 5), None));
                 }
-                FrameBeginResult::WaitUntil(_) => {}
+                FrameBeginResult::Wait(FrameWait::NextTick) => {}
                 other => panic!("callback {i}: {other:?}"),
             }
         }
@@ -1853,7 +1881,7 @@ mod tests {
         driver.request(FrameDemand::BACKGROUND);
         assert!(matches!(
             driver.begin_frame(tick_started_opportunity(1_000)).result,
-            FrameBeginResult::WaitUntil(_)
+            FrameBeginResult::Wait(FrameWait::NextTick)
         ));
 
         driver.request(FrameDemand::INPUT);
@@ -1877,7 +1905,7 @@ mod tests {
         assert!(!driver.needs_tick());
 
         driver.request(FrameDemand::ANIMATION);
-        let FrameBeginResult::WaitUntil(frame_start) =
+        let FrameBeginResult::Wait(FrameWait::Until(frame_start)) =
             driver.begin_frame(opportunity(1_000, 0)).result
         else {
             panic!("an animation frame starts as late as its deadline allows");
@@ -1885,7 +1913,7 @@ mod tests {
         assert!(driver.needs_tick());
         assert!(matches!(
             driver.begin_pending_frame(HostTime(frame_start.ticks() - 1)),
-            FrameBeginResult::WaitUntil(start) if start == frame_start
+            FrameBeginResult::Wait(FrameWait::Until(start)) if start == frame_start
         ));
 
         let FrameBeginResult::Ready(frame) = driver.begin_pending_frame(frame_start) else {
@@ -1932,7 +1960,10 @@ mod tests {
         let mut driver = driver();
         driver.request(FrameDemand::ANIMATION);
         let begin = driver.begin_frame(opportunity(1_000, 0));
-        assert!(matches!(begin.result, FrameBeginResult::WaitUntil(_)));
+        assert!(matches!(
+            begin.result,
+            FrameBeginResult::Wait(FrameWait::Until(_))
+        ));
 
         let FrameBeginResult::Expired(summary) = driver.begin_pending_frame(HostTime(1_200)) else {
             panic!("a wake after the deadline must expire the frame");
@@ -1952,7 +1983,7 @@ mod tests {
         let mut driver = driver();
         for _ in 0..2 {
             driver.request(FrameDemand::ANIMATION);
-            let FrameBeginResult::WaitUntil(start) = begin_at(&mut driver, 0) else {
+            let FrameBeginResult::Wait(FrameWait::Until(start)) = begin_at(&mut driver, 0) else {
                 panic!("an animation frame starts as late as its margins allow");
             };
             // The host's timer fires 4 ticks late.
@@ -1969,7 +2000,7 @@ mod tests {
         driver.request(FrameDemand::ANIMATION);
         assert!(matches!(
             begin_at(&mut driver, 0),
-            FrameBeginResult::WaitUntil(HostTime(84))
+            FrameBeginResult::Wait(FrameWait::Until(HostTime(84)))
         ));
     }
 

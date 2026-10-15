@@ -24,7 +24,7 @@ use frameclock::time::Timebase;
 use frameclock::timing::FramePlan;
 use frameclock::{
     Duration, FrameBeginResult, FrameDemand, FrameDriver, FrameOpportunity, FrameSubmission,
-    HostTime, OutputId, SchedulerConfig,
+    FrameWait, HostTime, OutputId, SchedulerConfig,
 };
 use understory_timing::{TimerId, TimerInstant, TimerQueue};
 use web_time::Instant;
@@ -205,11 +205,14 @@ impl WindowState {
         // returned wake time into its timer queue and sleeps.
         let frame = match self.begin_frame(now) {
             FrameBeginResult::Ready(frame) => frame,
-            FrameBeginResult::WaitUntil(frame_start) => {
+            FrameBeginResult::Wait(FrameWait::Until(frame_start)) => {
                 self.schedule_frame_start(frame_start);
                 self.arm_next_wake(started_at, event_loop);
                 return;
             }
+            // These hints start frames when planned, so no frame waits for a
+            // tick.
+            FrameBeginResult::Wait(FrameWait::NextTick) => return,
             FrameBeginResult::Expired(summary) => {
                 self.cancel_frame_start_wake();
                 // The host woke after the queued plan's commit deadline. Do

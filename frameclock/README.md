@@ -57,7 +57,7 @@ match driver.begin_frame(opportunity).result {
         let _ = driver.submit_frame(frame, FrameSubmission::new(platform::now(), None));
     }
     // The cadence starts this frame at a later callback.
-    FrameBeginResult::WaitUntil(_) => {}
+    FrameBeginResult::Wait(_) => {}
     FrameBeginResult::Expired(_) | FrameBeginResult::Idle => {}
 }
 // Keep the callbacks coming while `driver.needs_tick()`.
@@ -75,10 +75,13 @@ ticks usually looks like.
 
 The adapters' opportunities start each frame at a tick, so a host that renders
 from its frame callback never has to wake itself. A frame the cadence holds
-back returns `WaitUntil` and starts at the later callback it waits for. A host
-with its own timer can start frames later instead, nearer their deadline, so
-they sample fresher input: mark the hints `starting_when_planned`, wake at the
-time `WaitUntil` returns, and call `FrameDriver::begin_pending_frame`.
+back returns `Wait(FrameWait::NextTick)` and starts at the later callback it
+waits for. A host with its own timer can start frames later instead, nearer
+their deadline, so they sample fresher input: mark the hints
+`starting_when_planned`, and the driver returns `Wait(FrameWait::Until(time))`.
+Wake at that time and call `FrameDriver::begin_pending_frame`. The driver
+learns how late the host's wakes come and starts later frames that much
+earlier.
 
 ## Concepts
 
@@ -170,7 +173,7 @@ backend, build the `FrameOpportunity` directly:
 use frameclock::time::Timebase;
 use frameclock::{
     Duration, FrameBeginResult, FrameDemand, FrameDriver, FrameOpportunity,
-    FrameSubmission, HostTime, OutputId, SchedulerConfig,
+    FrameSubmission, FrameWait, HostTime, OutputId, SchedulerConfig,
 };
 
 // Host times here are nanoseconds. Pass the platform adapter's timebase
@@ -202,9 +205,12 @@ match begin.result {
         );
         _ = (sample_time, submit.summary);
     }
-    FrameBeginResult::WaitUntil(frame_start) => {
+    FrameBeginResult::Wait(FrameWait::Until(frame_start)) => {
         // Wake at frame_start, then call `begin_pending_frame`.
         _ = frame_start;
+    }
+    FrameBeginResult::Wait(FrameWait::NextTick) => {
+        // A later tick starts the frame.
     }
     FrameBeginResult::Expired(summary) => {
         // Record the dropped-frame summary and request fresh demand if needed.
