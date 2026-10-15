@@ -83,6 +83,12 @@ pub fn present_hints(tick: &FrameTick, fallback_refresh_interval: Duration) -> P
 /// (`PresentationTiming::Estimated`). If the prediction is missing or stale,
 /// the hint falls back to pacing-only timing aimed one refresh after the
 /// tick, as described by [`PresentHints::for_tick`].
+///
+/// The hints [start each frame at a tick](PresentHints::starting_at_tick),
+/// so a host that renders from its `VSync`-paced loop is handed ready frames
+/// there. A host with its own timer can mark them
+/// [`starting_when_planned`](PresentHints::starting_when_planned) to start
+/// frames nearer their deadline.
 #[must_use]
 pub fn present_hints_with_commit_lead(
     tick: &FrameTick,
@@ -95,6 +101,7 @@ pub fn present_hints_with_commit_lead(
         fallback_refresh_interval,
         commit_lead,
     )
+    .starting_at_tick()
 }
 
 /// Returns display timing for a Windows [`FrameTick`] and its target output.
@@ -144,10 +151,11 @@ pub fn frame_opportunity_with_commit_lead(
 mod tests {
     use super::{
         default_display_timing, display_timing, frame_opportunity, present_hints,
-        present_hints_with_commit_lead, timebase,
+        present_hints_with_commit_lead, scheduler_config, timebase,
     };
     use frameclock::timing::PresentationTiming;
     use frameclock::{DisplayTiming, Duration, FrameTick, HostTime, OutputId};
+    use frameclock::{FrameBeginResult, FrameDemand, FrameDriver, FrameSubmission};
 
     /// 16.67 ms in ticks of a 10 MHz QPC.
     const REFRESH: Duration = Duration(166_666);
@@ -204,6 +212,27 @@ mod tests {
             display_timing(&tick, fallback),
             DisplayTiming::fixed(REFRESH)
         );
+    }
+
+    #[test]
+    fn vsync_ticks_are_handed_ready_frames() {
+        let mut driver = FrameDriver::new(scheduler_config());
+        for i in 0..4 {
+            let now = HostTime(1_000_000 + i * REFRESH.ticks());
+            let tick = FrameTick {
+                now,
+                predicted_present: Some(HostTime(now.ticks() + REFRESH.ticks())),
+                refresh_interval: Some(REFRESH),
+                output: OutputId(0),
+                prev_actual_present: None,
+            };
+            driver.request(FrameDemand::ANIMATION);
+            let opportunity = frame_opportunity(tick, default_display_timing());
+            let FrameBeginResult::Ready(frame) = driver.begin_frame(opportunity).result else {
+                panic!("tick {i} must be handed a ready frame");
+            };
+            let _ = driver.submit_frame(frame, FrameSubmission::new(now, None));
+        }
     }
 
     #[test]
