@@ -41,6 +41,10 @@ impl MediaTimeline {
     /// `seconds_per_host_tick` is the conversion from one frameclock host tick
     /// to seconds at normal `1.0x` playback. For nanosecond host ticks, pass
     /// `1e-9`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `seconds_per_host_tick` is not finite.
     #[must_use]
     pub fn new(seconds_per_host_tick: f64) -> Self {
         Self::with_smoothing(
@@ -53,6 +57,12 @@ impl MediaTimeline {
 
     /// Creates a media timeline with explicit smoothing and discontinuity
     /// settings.
+    ///
+    /// The smoothing factors are interpreted as by [`AffineClock::new`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `seconds_per_host_tick` is not finite.
     #[must_use]
     pub fn with_smoothing(
         seconds_per_host_tick: f64,

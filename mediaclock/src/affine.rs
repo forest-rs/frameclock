@@ -84,15 +84,25 @@ impl AffineClock {
     /// ticks, this would be `1e-9`). It is also the initial rate that
     /// [`reset`](Self::reset) restores, so the value chosen here sets the
     /// post-reset baseline unless [`set_rate`](Self::set_rate) replaces it.
+    ///
+    /// `rate_alpha` and `offset_alpha` are smoothing factors in `0.0..=1.0`:
+    /// how much of each observation's error the mapping corrects. Values
+    /// outside that range are clamped to it, and non-finite values follow
+    /// each observation fully (`1.0`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `initial_rate` is not finite.
     #[must_use]
     pub fn new(initial_rate: f64, rate_alpha: f64, offset_alpha: f64) -> Self {
+        assert!(initial_rate.is_finite(), "initial rate must be finite");
         Self {
             rate: initial_rate,
             initial_rate,
             epoch_host: 0,
             epoch_media: 0.0,
-            rate_alpha,
-            offset_alpha,
+            rate_alpha: sanitize_alpha(rate_alpha),
+            offset_alpha: sanitize_alpha(offset_alpha),
             initialized: false,
             last_host: 0,
             last_media: 0.0,
@@ -289,6 +299,14 @@ impl AffineClock {
         self.last_host = 0;
         self.last_media = 0.0;
         self.rate_baseline = false;
+    }
+}
+
+fn sanitize_alpha(alpha: f64) -> f64 {
+    if alpha.is_finite() {
+        alpha.clamp(0.0, 1.0)
+    } else {
+        1.0
     }
 }
 
@@ -532,6 +550,17 @@ mod tests {
             clock.update(host(at), truth + 1e-3 * jitter.next());
         }
         assert!(worst < 0.005, "worst error {worst} s");
+    }
+
+    #[test]
+    fn invalid_smoothing_factors_cannot_poison_the_clock() {
+        let mut clock = AffineClock::new(1e-9, f64::NAN, 1.5);
+        clock.update(host(0), 0.0);
+        clock.update(host(1_000_000_000), 1.0);
+        clock.update(host(2_000_000_000), 2.0);
+
+        let media = clock.media_time_at(host(3_000_000_000)).unwrap();
+        assert!((media - 3.0).abs() < 1e-9, "got {media}");
     }
 
     #[test]
