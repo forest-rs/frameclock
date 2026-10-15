@@ -89,17 +89,18 @@ impl MediaTimeline {
         self.clock.rate()
     }
 
-    /// Sets the commanded playback rate.
+    /// Sets the commanded playback rate from `host` onward.
     ///
-    /// This changes the clock rate immediately and is intended for known
-    /// playback-rate commands, not drift learning. Non-finite rates are ignored.
-    pub fn set_playback_rate(&mut self, playback_rate: f64) {
+    /// This is intended for known playback-rate commands, not drift learning.
+    /// Media time stays continuous at `host`, as described by
+    /// [`AffineClock::set_rate`]. Non-finite rates are ignored.
+    pub fn set_playback_rate(&mut self, host: HostTime, playback_rate: f64) {
         if !playback_rate.is_finite() {
             return;
         }
         self.playback_rate = playback_rate;
         self.clock
-            .set_rate(self.seconds_per_host_tick * playback_rate);
+            .set_rate(host, self.seconds_per_host_tick * playback_rate);
     }
 
     /// Returns whether the timeline is currently paused.
@@ -242,7 +243,7 @@ mod tests {
         timeline.observe(host(0), 0.0);
         timeline.observe(host(1_000_000_000), 1.0);
 
-        timeline.set_playback_rate(2.0);
+        timeline.set_playback_rate(host(1_000_000_000), 2.0);
 
         assert_eq!(timeline.playback_rate(), 2.0);
         assert_eq!(timeline.effective_rate(), 2e-9);
@@ -253,7 +254,7 @@ mod tests {
     #[test]
     fn reset_preserves_commanded_playback_rate() {
         let mut timeline = MediaTimeline::new(1e-9);
-        timeline.set_playback_rate(0.5);
+        timeline.set_playback_rate(host(0), 0.5);
         timeline.observe(host(0), 4.0);
         assert!(timeline.media_time_at(host(1_000_000_000)).is_some());
 

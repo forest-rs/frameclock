@@ -71,6 +71,10 @@ pub struct AffineClock {
     last_host: u64,
     /// Last media time observation.
     last_media: f64,
+    /// Whether the next observation may estimate a rate from the span since
+    /// the last observation. A commanded rate change between observations
+    /// clears this, because that span runs partly at each rate.
+    rate_baseline: bool,
 }
 
 impl AffineClock {
@@ -92,6 +96,7 @@ impl AffineClock {
             initialized: false,
             last_host: 0,
             last_media: 0.0,
+            rate_baseline: false,
         }
     }
 
@@ -145,7 +150,7 @@ impl AffineClock {
             return AffineClockUpdate::Ignored;
         }
 
-        if self.initialized && host.ticks() <= self.last_host {
+        if self.initialized && !self.accepts(host.ticks()) {
             return AffineClockUpdate::Ignored;
         }
 
@@ -171,8 +176,7 @@ impl AffineClock {
             return AffineClockUpdate::Initialized;
         }
 
-        let dt_host = host_ticks.saturating_sub(self.last_host);
-        if dt_host == 0 {
+        if !self.accepts(host_ticks) {
             return AffineClockUpdate::Ignored;
         }
 
@@ -181,12 +185,15 @@ impl AffineClock {
         let predicted_media = self.media_time_at_initialized(host_ticks);
         let offset_error = media_time - predicted_media;
 
-        // Estimate instantaneous rate from this pair of observations.
-        let dt_media = media_time - self.last_media;
-        let observed_rate = dt_media / dt_host as f64;
-
-        // Smooth rate.
-        self.rate = self.rate_alpha * observed_rate + (1.0 - self.rate_alpha) * self.rate;
+        // Estimate the instantaneous rate from this pair of observations and
+        // smooth it in. Both ends are measurements: the mapping's own
+        // prediction error must not be read as rate.
+        if self.rate_baseline {
+            let dt_host = host_ticks - self.last_host;
+            let dt_media = media_time - self.last_media;
+            let observed_rate = dt_media / dt_host as f64;
+            self.rate = self.rate_alpha * observed_rate + (1.0 - self.rate_alpha) * self.rate;
+        }
 
         // Move the epoch to this observation with a smoothed offset
         // correction, so the new rate pivots here. Pivoting at an older
@@ -197,7 +204,15 @@ impl AffineClock {
 
         self.last_host = host_ticks;
         self.last_media = media_time;
+        self.rate_baseline = true;
         AffineClockUpdate::Smoothed
+    }
+
+    /// Whether an initialized clock takes an observation at `host_ticks`: it
+    /// must be newer than the last observation and not predate a commanded
+    /// rate change, which anchors the epoch.
+    fn accepts(&self, host_ticks: u64) -> bool {
+        host_ticks > self.last_host && host_ticks >= self.epoch_host
     }
 
     /// Reanchors the mapping exactly at `(host_time, media_time)`.
@@ -214,28 +229,40 @@ impl AffineClock {
         self.epoch_media = media_time;
         self.last_host = host.ticks();
         self.last_media = media_time;
+        self.rate_baseline = true;
         self.initialized = true;
     }
 
-    /// Sets the commanded host-to-media rate immediately.
+    /// Sets the commanded host-to-media rate from `host` onward.
     ///
     /// This is for known playback-rate changes, not clock drift. If the clock
-    /// is initialized, the current mapping is preserved at the last observed
-    /// host time before the rate changes so media time remains continuous. The
-    /// new rate also becomes the baseline restored by [`reset`](Self::reset).
-    pub fn set_rate(&mut self, rate: f64) {
+    /// is initialized, the mapping is anchored at `host` before the rate
+    /// changes, so media time is continuous at the moment of the change. A
+    /// `host` earlier than the last accepted observation anchors at that
+    /// observation instead: a rate change cannot predate what the clock has
+    /// already seen. Observations from before the anchor are ignored
+    /// afterward, and the mapping's prediction at the anchor is not treated
+    /// as an observation, so its error does not feed the next rate estimate.
+    /// The new rate also becomes the baseline restored by
+    /// [`reset`](Self::reset). Non-finite rates are ignored.
+    pub fn set_rate(&mut self, host: HostTime, rate: f64) {
         if !rate.is_finite() {
             return;
         }
 
         if self.initialized {
-            let anchor_host = self.last_host;
+            let anchor_host = host.ticks().max(self.last_host);
             let anchor_media = self.media_time_at_initialized(anchor_host);
             self.rate = rate;
             self.initial_rate = rate;
             self.epoch_host = anchor_host;
             self.epoch_media = anchor_media;
-            self.last_media = anchor_media;
+            // The last observation still measures the new rate if the change
+            // happened at it. Otherwise the span from it to the next one is
+            // mixed, so the next observation only becomes the new baseline.
+            if anchor_host > self.last_host {
+                self.rate_baseline = false;
+            }
         } else {
             self.rate = rate;
             self.initial_rate = rate;
@@ -261,6 +288,7 @@ impl AffineClock {
         self.initialized = false;
         self.last_host = 0;
         self.last_media = 0.0;
+        self.rate_baseline = false;
     }
 }
 
@@ -385,10 +413,93 @@ mod tests {
         clock.update(host(0), 0.0);
         clock.update(host(1_000_000_000), 1.0);
 
-        clock.set_rate(2e-9);
+        clock.set_rate(host(1_000_000_000), 2e-9);
 
         assert!((clock.media_time_at(host(1_000_000_000)).unwrap() - 1.0).abs() < 1e-12);
         assert!((clock.media_time_at(host(2_000_000_000)).unwrap() - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn set_rate_between_observations_keeps_media_time_continuous() {
+        let mut clock = AffineClock::new(1e-9, 0.1, 0.1);
+        clock.update(host(0), 0.0);
+        clock.update(host(1_000_000_000), 1.0);
+        let at_change = clock.media_time_at(host(1_500_000_000)).unwrap();
+
+        clock.set_rate(host(1_500_000_000), 2e-9);
+
+        let after = clock.media_time_at(host(1_500_000_000)).unwrap();
+        assert!(
+            (after - at_change).abs() < 1e-12,
+            "jumped from {at_change} to {after}"
+        );
+        assert!((clock.media_time_at(host(2_500_000_000)).unwrap() - 3.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn set_rate_cannot_predate_an_accepted_observation() {
+        let mut clock = AffineClock::new(1e-9, 0.1, 0.1);
+        clock.update(host(0), 0.0);
+        clock.update(host(1_000_000_000), 1.0);
+
+        clock.set_rate(host(500_000_000), 2e-9);
+
+        assert!((clock.media_time_at(host(1_000_000_000)).unwrap() - 1.0).abs() < 1e-12);
+        assert!((clock.media_time_at(host(2_000_000_000)).unwrap() - 3.0).abs() < 1e-12);
+    }
+
+    /// Feeds a 1x clock whose media position jumps 0.2 s ahead just before
+    /// `command_at`, so the mapping still carries most of that error, then
+    /// commands 2x at `command_at` and feeds exact 2x observations every
+    /// 100 ms.
+    fn command_double_rate_with_offset_error(command_at: u64) -> AffineClock {
+        const STEP: u64 = 100_000_000;
+        let mut clock = AffineClock::new(1e-9, 0.1, 0.1);
+        for i in 0..=10_u64 {
+            let jump = if i == 10 { 0.2 } else { 0.0 };
+            clock.update(host(i * STEP), (i * STEP) as f64 * 1e-9 + jump);
+        }
+        let last = 10 * STEP;
+        assert!(
+            (clock.media_time_at(host(last)).unwrap() - 1.2).abs() > 0.05,
+            "precondition: the mapping should still be off"
+        );
+
+        clock.set_rate(host(command_at), 2e-9);
+        let media_at_command = 1.2 + (command_at - last) as f64 * 1e-9;
+        for i in 1..=3_u64 {
+            let at = command_at + i * STEP;
+            clock.update(host(at), media_at_command + (i * STEP) as f64 * 2e-9);
+        }
+        clock
+    }
+
+    #[test]
+    fn set_rate_does_not_learn_from_the_mapping_error() {
+        for command_at in [1_000_000_000, 1_050_000_000] {
+            let clock = command_double_rate_with_offset_error(command_at);
+            let rate = clock.rate();
+            assert!(
+                (rate - 2e-9).abs() < 1e-12,
+                "commanding 2x at {command_at} learned {rate:e}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_rate_ignores_observations_from_before_the_change() {
+        let mut clock = AffineClock::new(1e-9, 0.1, 0.1);
+        clock.update(host(0), 0.0);
+        clock.update(host(1_000_000_000), 1.0);
+        clock.set_rate(host(1_500_000_000), 2e-9);
+        let before = clock.media_time_at(host(2_500_000_000)).unwrap();
+
+        assert_eq!(
+            clock.update_or_reanchor(host(1_200_000_000), 1.2, 0.25),
+            AffineClockUpdate::Ignored
+        );
+
+        assert_eq!(clock.media_time_at(host(2_500_000_000)).unwrap(), before);
     }
 
     /// A deterministic jitter source in `-1.0..1.0`.
