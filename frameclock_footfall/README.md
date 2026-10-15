@@ -45,7 +45,7 @@ known at begin, but recording them then would only duplicate it.
 | `expected_present` | `FramePointKind::Expected` |
 | `actual_present` | `FramePointKind::Presented`, observed for `ActualPresent` and estimated otherwise |
 | `drop_reason` | `FramePointKind::Dropped`, with the matching `DropReason` |
-| `pipeline_depth`, `safety_margin_ticks`, `frame_interval`, `scheduler_state.present_latency_ticks` | args on the deadline point: `pipeline_depth`, `safety_margin_ns`, `frame_interval_ns`, `present_latency_ns` |
+| `pipeline_depth`, `safety_margin_ticks`, `frame_interval`, `present_latency` | args on the deadline point: `pipeline_depth`, `safety_margin_ns`, `frame_interval_ns`, `present_latency_ns` |
 | `work` | also the `frameclock_submission_work` histogram, in nanoseconds |
 
 The scheduler state rides on the frame's own deadline point rather than in

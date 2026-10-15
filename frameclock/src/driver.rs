@@ -1584,6 +1584,33 @@ mod tests {
     }
 
     #[test]
+    fn summary_reports_the_present_latency_the_frame_was_planned_with() {
+        let mut driver = driver();
+        driver.request(FrameDemand::INPUT);
+        let FrameBeginResult::Ready(frame) = driver
+            .begin_frame(predictive_opportunity(10, 0, 100, 90))
+            .result
+        else {
+            panic!("input should start immediately");
+        };
+
+        // Committed on time and shown two refreshes late.
+        let submit = driver.submit_frame(
+            frame,
+            FrameSubmission::new(HostTime(20), Some(HostTime(300))),
+        );
+        let summary = submit
+            .summary
+            .expect("an actual present resolves the frame");
+
+        assert_eq!(summary.present_latency, Duration::ZERO);
+        let state = summary
+            .scheduler_state
+            .expect("submitted frames sample state");
+        assert!(state.present_latency_ticks > 0, "the frame taught latency");
+    }
+
+    #[test]
     fn deferred_submission_ignores_a_present_before_it_was_submitted() {
         let mut driver = driver();
         driver.request(FrameDemand::INPUT);

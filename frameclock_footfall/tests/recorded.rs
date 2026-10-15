@@ -152,6 +152,7 @@ fn summary(frame_index: u64) -> FrameTimingSummary {
         pacing_overrun: None,
         drop_reason: None,
         pipeline_depth: 2,
+        present_latency: Duration(60),
         safety_margin_ticks: 300,
         scheduler_state: Some(SchedulerState {
             pipeline_depth: 2,
@@ -183,7 +184,7 @@ fn a_shown_frame_records_every_time_frameclock_knows_in_host_ticks() {
                 ("pipeline_depth", LabelValue::Unsigned(2)),
                 ("safety_margin_ns", LabelValue::Unsigned(12_500)),
                 ("frame_interval_ns", LabelValue::Unsigned(125_000)),
-                ("present_latency_ns", LabelValue::Unsigned(1_250)),
+                ("present_latency_ns", LabelValue::Unsigned(2_500)),
             ]),
             point(1234, FramePointKind::Target, Some(4_000)),
             point(1234, FramePointKind::Sampled, Some(4_000)),
@@ -247,7 +248,7 @@ fn a_frame_the_display_never_showed_is_not_presented() {
 }
 
 #[test]
-fn the_plan_records_only_the_scheduler_state_it_sampled() {
+fn the_plan_records_its_latency_without_a_scheduler_state_sample() {
     let (backend, _serial) = recording();
     let mut unsampled = summary(8);
     unsampled.scheduler_state = None;
@@ -263,7 +264,9 @@ fn the_plan_records_only_the_scheduler_state_it_sampled() {
             ("pipeline_depth", LabelValue::Unsigned(2)),
             ("safety_margin_ns", LabelValue::Unsigned(12_500)),
             ("frame_interval_ns", LabelValue::Unsigned(125_000)),
-        ]))
+            ("present_latency_ns", LabelValue::Unsigned(2_500)),
+        ])),
+        "the latency comes from the plan, not the state sampled after feedback"
     );
 }
 
