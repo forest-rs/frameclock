@@ -115,11 +115,14 @@ Because RAF is pacing-only, `PresentHints::desired_present` is `None` and
 after the RAF tick time. By default the lead is a quarter of the interval; use
 `frame_opportunity_with_commit_lead` when the host has a better estimate of the
 time the browser needs after the callback. A browser shows only what is drawn
-during the callback, so the hints start each frame at the tick and
-`FrameDriver::begin_frame` returns a ready frame during the callback instead of
-`WaitUntil`. Hosts that can get richer browser timing from media APIs, such as
-video frame callbacks, should build their own `FrameOpportunity` or use a
-future media-specific adapter instead of forcing that data through plain RAF.
+during the callback, so the hints start each frame at a tick:
+`FrameDriver::begin_frame` returns a ready frame during the callback, and a
+frame the cadence holds back, such as background work every other refresh,
+returns `Wait(FrameWait::NextTick)` and is ready at the later callback it waits
+for. Keep requesting animation frames while `FrameDriver::needs_tick` is true.
+Hosts that can get richer browser timing from media APIs, such as video frame
+callbacks, should build their own `FrameOpportunity` or use a future
+media-specific adapter instead of forcing that data through plain RAF.
 
 ## Submitting Frames
 
