@@ -225,6 +225,10 @@ pub struct SchedulerState {
     pub consecutive_misses: u32,
     /// Consecutive strong hits currently accumulated.
     pub consecutive_hits: u32,
+    /// How much earlier than its margins a queued frame now starts, in
+    /// host-time ticks, because the host wakes late for it: what
+    /// [`Scheduler::observe_wake`] learned.
+    pub wake_lateness_ticks: u64,
 }
 
 /// The most refresh intervals [`SchedulerConfig::present_latency_alpha`]
@@ -352,6 +356,9 @@ pub struct Scheduler {
     present_latency_ema: Ema,
     present_latency_ticks: u64,
     safety_margin_ticks: u64,
+    /// How late the host wakes for a frame's start.
+    wake_lateness_ema: Ema,
+    wake_lateness_ticks: u64,
     consecutive_misses: u32,
     consecutive_hits: u32,
 }
@@ -377,6 +384,8 @@ impl Scheduler {
             present_latency_ema: Ema::seeded(sanitize_ema_alpha(config.present_latency_alpha), 0.0),
             present_latency_ticks: 0,
             safety_margin_ticks: 0,
+            wake_lateness_ema: Ema::new(config.ema_alpha),
+            wake_lateness_ticks: 0,
             consecutive_misses: 0,
             consecutive_hits: 0,
             config,
@@ -581,11 +590,37 @@ impl Scheduler {
 
     fn frame_start_margin(&self) -> Duration {
         let learned = Duration(self.safety_margin_ticks);
-        if learned > self.config.minimum_frame_start_margin {
+        let build = if learned > self.config.minimum_frame_start_margin {
             learned
         } else {
             self.config.minimum_frame_start_margin
-        }
+        };
+        build.saturating_add(Duration(self.wake_lateness_ticks))
+    }
+
+    /// Learns how late the host woke to start a frame.
+    ///
+    /// `lateness` is how long after a plan's [`FramePlan::frame_start`] the
+    /// host began the frame. A host's timer fires some time after the time
+    /// it was set for, and a frame planned to start as late as its margins
+    /// allow has none of that to spare: woken a millisecond late, it starts
+    /// a millisecond short. The scheduler starts later frames earlier by
+    /// this lateness, smoothed by [`SchedulerConfig::ema_alpha`] and scaled
+    /// by [`SchedulerConfig::safety_multiplier`].
+    ///
+    /// [`FrameDriver`](crate::FrameDriver) calls this when a queued frame
+    /// that starts [when planned](crate::PresentHints::starting_when_planned)
+    /// is released or expires, so hosts using it do not. Frames that
+    /// [start at a tick](crate::PresentHints::starting_at_tick) are released
+    /// by the tick, not a wake, and teach nothing here.
+    pub fn observe_wake(&mut self, lateness: Duration) {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "host ticks of a wake's lateness"
+        )]
+        self.wake_lateness_ema.update(lateness.ticks() as f64);
+        self.wake_lateness_ticks =
+            f64_ticks_to_u64(self.wake_lateness_ema.get() * self.config.safety_multiplier);
     }
 
     fn build_cost_estimate(&self) -> Duration {
@@ -715,6 +750,13 @@ impl Scheduler {
         self.safety_margin_ticks
     }
 
+    /// Returns how much earlier queued frames start because the host wakes
+    /// late for them, in host-time ticks. See [`Self::observe_wake`].
+    #[must_use]
+    pub fn wake_lateness_ticks(&self) -> u64 {
+        self.wake_lateness_ticks
+    }
+
     /// Returns a snapshot of the current scheduler adaptation state.
     #[must_use]
     pub const fn state(&self) -> SchedulerState {
@@ -724,6 +766,7 @@ impl Scheduler {
             safety_margin_ticks: self.safety_margin_ticks,
             consecutive_misses: self.consecutive_misses,
             consecutive_hits: self.consecutive_hits,
+            wake_lateness_ticks: self.wake_lateness_ticks,
         }
     }
 }

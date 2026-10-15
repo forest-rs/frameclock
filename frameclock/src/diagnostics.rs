@@ -730,6 +730,7 @@ mod tests {
                 safety_margin_ticks: 600,
                 consecutive_misses: 1,
                 consecutive_hits: 0,
+                wake_lateness_ticks: 0,
             },
         };
 
