@@ -60,10 +60,14 @@ pub const fn timebase() -> Timebase {
 ///
 /// Browsers do not expose a portable predicted present time or commit deadline
 /// through `requestAnimationFrame`, so `desired_present` is `None` and
-/// `latest_commit` is one refresh interval after the tick's `now`.
+/// `latest_commit` is one refresh interval after the tick's `now`. A missing
+/// or zero refresh interval on the tick uses `fallback_refresh_interval`.
 #[must_use]
 pub fn present_hints(tick: &FrameTick, fallback_refresh_interval: Duration) -> PresentHints {
-    let refresh_interval = tick.refresh_interval.unwrap_or(fallback_refresh_interval);
+    let refresh_interval = tick
+        .refresh_interval
+        .filter(|interval| !interval.is_zero())
+        .unwrap_or(fallback_refresh_interval);
     PresentHints::pacing_only(
         tick.now
             .checked_add(refresh_interval)
@@ -122,6 +126,20 @@ mod tests {
         let hints = present_hints(&tick, DEFAULT_REFRESH_INTERVAL);
 
         assert_eq!(hints.desired_present(), None);
+        assert_eq!(
+            hints.latest_commit(),
+            HostTime(16_000 + DEFAULT_REFRESH_INTERVAL.ticks())
+        );
+    }
+
+    #[test]
+    fn present_hints_ignore_a_zero_refresh_interval() {
+        let tick = FrameTick {
+            refresh_interval: Some(Duration::ZERO),
+            ..test_tick()
+        };
+        let hints = present_hints(&tick, DEFAULT_REFRESH_INTERVAL);
+
         assert_eq!(
             hints.latest_commit(),
             HostTime(16_000 + DEFAULT_REFRESH_INTERVAL.ticks())
