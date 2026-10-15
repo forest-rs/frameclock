@@ -102,6 +102,12 @@ pub fn present_hints(tick: &FrameTick, fallback_refresh_interval: Duration) -> P
 /// the tick, as described by [`PresentHints::for_tick`]. The scheduler applies
 /// its own learned build margin later when it turns these platform facts into
 /// a [`frameclock::timing::FramePlan`].
+///
+/// The hints [start each frame at a tick](PresentHints::starting_at_tick),
+/// so a host that renders from the display-link callback is handed ready
+/// frames there. A host with its own timer can mark them
+/// [`starting_when_planned`](PresentHints::starting_when_planned) to start
+/// frames nearer their deadline.
 #[must_use]
 pub fn present_hints_with_commit_lead(
     tick: &FrameTick,
@@ -114,6 +120,7 @@ pub fn present_hints_with_commit_lead(
         fallback_refresh_interval,
         commit_lead,
     )
+    .starting_at_tick()
 }
 
 /// Converts a Core Animation media time to [`HostTime`].
@@ -290,7 +297,29 @@ fn fps_for_interval(interval: Duration, timebase: Timebase) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frameclock::OutputId;
+    use frameclock::{FrameBeginResult, FrameDemand, FrameDriver, OutputId};
+
+    #[test]
+    fn display_link_callbacks_are_handed_ready_frames() {
+        let refresh = Duration::from_nanos(8_333_333, timebase());
+        let mut driver = FrameDriver::new(scheduler_config());
+        for i in 0..4 {
+            let now = HostTime(1_000_000 + i * refresh.ticks());
+            let tick = FrameTick {
+                now,
+                predicted_present: Some(HostTime(now.ticks() + refresh.ticks())),
+                refresh_interval: Some(refresh),
+                output: OutputId(0),
+                prev_actual_present: None,
+            };
+            driver.request(FrameDemand::ANIMATION);
+            let opportunity = frame_opportunity(tick, default_display_timing());
+            let FrameBeginResult::Ready(frame) = driver.begin_frame(opportunity).result else {
+                panic!("callback {i} must be handed a ready frame");
+            };
+            let _ = driver.submit_frame(frame, FrameSubmission::new(now, None));
+        }
+    }
 
     #[test]
     fn default_display_timing_is_60_hz() {
