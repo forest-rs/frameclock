@@ -80,7 +80,7 @@ impl DisplayLinkTarget {
         let tick = FrameTick {
             now,
             predicted_present,
-            refresh_interval: Some(refresh_interval),
+            refresh_interval: Some(Duration(refresh_interval)),
             output: ivars.output,
             prev_actual_present,
         };

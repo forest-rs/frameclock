@@ -36,7 +36,7 @@ pub struct FrameTickEvent {
     /// Predicted presentation time, if the platform exposes one.
     pub predicted_present: Option<HostTime>,
     /// Refresh interval in host-time ticks, if known.
-    pub refresh_interval: Option<u64>,
+    pub refresh_interval: Option<Duration>,
 }
 
 impl FrameTickEvent {
@@ -260,7 +260,7 @@ pub struct FrameTimingSummary {
     /// Predicted presentation time from the originating tick, if known.
     pub predicted_present: Option<HostTime>,
     /// Refresh interval from the originating tick, if known.
-    pub refresh_interval: Option<u64>,
+    pub refresh_interval: Option<Duration>,
     /// Demand that selected this frame.
     pub demand: FrameDemand,
     /// Scheduler-selected delivery interval for this frame.
@@ -635,7 +635,7 @@ mod tests {
             output: OutputId(2),
             now: HostTime(1_000),
             predicted_present: Some(HostTime(2_000)),
-            refresh_interval: Some(16_666_667),
+            refresh_interval: Some(Duration(16_666_667)),
         }
     }
 

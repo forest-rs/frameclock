@@ -5,7 +5,7 @@
 
 use crate::queue::BoundedQueue;
 use crate::time::{Clock, ust_to_host_time};
-use frameclock::{FrameTick, HostTime, OutputId};
+use frameclock::{Duration, FrameTick, HostTime, OutputId};
 
 const MICROS_TO_NANOS: u64 = 1_000;
 
@@ -94,7 +94,7 @@ pub struct PresentTicker {
     queue: TickQueue,
     notify_in_flight: bool,
     last_present: Option<PresentSample>,
-    refresh_interval: Option<u64>,
+    refresh_interval: Option<Duration>,
     output: OutputId,
 }
 
@@ -214,10 +214,10 @@ impl PresentTicker {
         true
     }
 
-    /// Returns the most recently observed refresh interval in host ticks, if a
-    /// second completion has established the display cadence.
+    /// Returns the most recently observed refresh interval, if a second
+    /// completion has established the display cadence.
     #[must_use]
-    pub fn observed_refresh_interval(&self) -> Option<u64> {
+    pub fn observed_refresh_interval(&self) -> Option<Duration> {
         self.refresh_interval
     }
 }
@@ -228,16 +228,20 @@ impl Default for PresentTicker {
     }
 }
 
-/// Computes the per-vblank refresh interval (host ticks) from two completions.
+/// Computes the per-vblank refresh interval from two completions.
 ///
 /// Returns `None` when the counter did not advance (a duplicate or reordered
 /// completion) or the resulting interval would be zero, so a bad sample never
 /// overwrites a good cadence.
-fn refresh_interval_from_samples(prev: PresentSample, ust_micros: u64, msc: u64) -> Option<u64> {
+fn refresh_interval_from_samples(
+    prev: PresentSample,
+    ust_micros: u64,
+    msc: u64,
+) -> Option<Duration> {
     let msc_delta = msc.checked_sub(prev.msc).filter(|delta| *delta > 0)?;
     let ust_delta_micros = ust_micros.checked_sub(prev.ust_micros)?;
     let per_frame = ust_delta_micros.saturating_mul(MICROS_TO_NANOS) / msc_delta;
-    (per_frame > 0).then_some(per_frame)
+    (per_frame > 0).then_some(Duration(per_frame))
 }
 
 /// Predicts the next vblank at or after `now` from the last observed present.
@@ -248,10 +252,12 @@ fn refresh_interval_from_samples(prev: PresentSample, ust_micros: u64, msc: u64)
 /// grid.
 fn predict_next_present(
     last_actual: HostTime,
-    refresh_interval: Option<u64>,
+    refresh_interval: Option<Duration>,
     now: HostTime,
 ) -> Option<HostTime> {
-    let refresh = refresh_interval.filter(|interval| *interval > 0)?;
+    let refresh = refresh_interval
+        .filter(|interval| !interval.is_zero())?
+        .ticks();
     let elapsed = now.ticks().saturating_sub(last_actual.ticks());
     let intervals = elapsed.div_ceil(refresh);
     let advance = intervals.checked_mul(refresh)?;
@@ -262,7 +268,7 @@ fn predict_next_present(
 mod tests {
     use super::{PresentTicker, TickQueue, predict_next_present};
     use crate::time::Clock;
-    use frameclock::{HostTime, OutputId};
+    use frameclock::{Duration, HostTime, OutputId};
 
     #[test]
     fn poll_tick_returns_none_when_empty() {
@@ -324,16 +330,25 @@ mod tests {
         ticker.on_complete_notify(Clock::Monotonic, 1_000_000, 100);
         assert!(ticker.mark_notify_requested());
         ticker.on_complete_notify(Clock::Monotonic, 1_016_667, 101);
-        assert_eq!(ticker.observed_refresh_interval(), Some(16_667_000));
+        assert_eq!(
+            ticker.observed_refresh_interval(),
+            Some(Duration(16_667_000))
+        );
 
         ticker.set_output(OutputId(1));
         assert!(ticker.mark_notify_requested());
         ticker.on_complete_notify(Clock::Monotonic, 1_033_334, 10_000);
-        assert_eq!(ticker.observed_refresh_interval(), Some(16_667_000));
+        assert_eq!(
+            ticker.observed_refresh_interval(),
+            Some(Duration(16_667_000))
+        );
 
         assert!(ticker.mark_notify_requested());
         ticker.on_complete_notify(Clock::Monotonic, 1_041_667, 10_001);
-        assert_eq!(ticker.observed_refresh_interval(), Some(8_333_000));
+        assert_eq!(
+            ticker.observed_refresh_interval(),
+            Some(Duration(8_333_000))
+        );
     }
 
     #[test]
@@ -349,8 +364,11 @@ mod tests {
         ticker.on_complete_notify(Clock::Monotonic, 1_016_667, 101);
 
         let tick = ticker.poll_tick().expect("should have a tick");
-        assert_eq!(tick.refresh_interval, Some(16_667_000));
-        assert_eq!(ticker.observed_refresh_interval(), Some(16_667_000));
+        assert_eq!(tick.refresh_interval, Some(Duration(16_667_000)));
+        assert_eq!(
+            ticker.observed_refresh_interval(),
+            Some(Duration(16_667_000))
+        );
         // Prediction lands on the vblank grid at or after `now`.
         let predicted = tick.predicted_present.expect("prediction available");
         assert!(predicted >= tick.now);
@@ -370,7 +388,7 @@ mod tests {
         let tick = ticker.poll_tick().expect("should have a tick");
 
         // 50_000 µs / 3 vblanks = 16_666_666 ns per vblank.
-        assert_eq!(tick.refresh_interval, Some(16_666_666));
+        assert_eq!(tick.refresh_interval, Some(Duration(16_666_666)));
     }
 
     #[test]
@@ -383,13 +401,19 @@ mod tests {
         assert!(ticker.mark_notify_requested());
         ticker.on_complete_notify(Clock::Monotonic, 3_016_667, 301);
         let _ = ticker.poll_tick();
-        assert_eq!(ticker.observed_refresh_interval(), Some(16_667_000));
+        assert_eq!(
+            ticker.observed_refresh_interval(),
+            Some(Duration(16_667_000))
+        );
 
         // A completion with the same msc yields no delta and is ignored.
         assert!(ticker.mark_notify_requested());
         ticker.on_complete_notify(Clock::Monotonic, 3_016_667, 301);
         let _ = ticker.poll_tick();
-        assert_eq!(ticker.observed_refresh_interval(), Some(16_667_000));
+        assert_eq!(
+            ticker.observed_refresh_interval(),
+            Some(Duration(16_667_000))
+        );
     }
 
     #[test]
@@ -404,7 +428,10 @@ mod tests {
             assert!(ticker.mark_notify_requested());
             ticker.on_complete_notify(Clock::Monotonic, ust, msc);
         }
-        assert_eq!(ticker.observed_refresh_interval(), Some(16_667_000));
+        assert_eq!(
+            ticker.observed_refresh_interval(),
+            Some(Duration(16_667_000))
+        );
     }
 
     #[test]
@@ -465,13 +492,13 @@ mod tests {
     #[test]
     fn predict_next_present_rounds_up_to_next_vblank() {
         // last + 4*refresh = 1640 is the first vblank at or after now = 1500.
-        let predicted = predict_next_present(HostTime(1000), Some(160), HostTime(1500));
+        let predicted = predict_next_present(HostTime(1000), Some(Duration(160)), HostTime(1500));
         assert_eq!(predicted, Some(HostTime(1640)));
     }
 
     #[test]
     fn predict_next_present_on_exact_vblank_returns_now() {
-        let predicted = predict_next_present(HostTime(1000), Some(160), HostTime(1480));
+        let predicted = predict_next_present(HostTime(1000), Some(Duration(160)), HostTime(1480));
         assert_eq!(predicted, Some(HostTime(1480)));
     }
 
@@ -482,7 +509,7 @@ mod tests {
             None
         );
         assert_eq!(
-            predict_next_present(HostTime(1000), Some(0), HostTime(1500)),
+            predict_next_present(HostTime(1000), Some(Duration(0)), HostTime(1500)),
             None
         );
     }

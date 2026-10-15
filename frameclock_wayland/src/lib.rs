@@ -87,8 +87,7 @@ pub const fn default_commit_lead(refresh_interval: Duration) -> Duration {
 
 fn refresh_interval_for_tick(tick: &FrameTick, fallback_refresh_interval: Duration) -> Duration {
     tick.refresh_interval
-        .filter(|ticks| *ticks > 0)
-        .map(Duration)
+        .filter(|interval| !interval.is_zero())
         .unwrap_or(fallback_refresh_interval)
 }
 
@@ -195,7 +194,7 @@ mod tests {
         FrameTick {
             now: HostTime(1_000_000),
             predicted_present,
-            refresh_interval: Some(16_666_667),
+            refresh_interval: Some(Duration(16_666_667)),
             output: OutputId(0),
             prev_actual_present: None,
         }
@@ -237,7 +236,7 @@ mod tests {
         let stale_tick = FrameTick {
             now: HostTime(2_000_000),
             predicted_present: Some(HostTime(1_900_000)),
-            refresh_interval: Some(16_666_667),
+            refresh_interval: Some(Duration(16_666_667)),
             output: OutputId(0),
             prev_actual_present: None,
         };

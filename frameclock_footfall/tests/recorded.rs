@@ -137,7 +137,7 @@ fn summary(frame_index: u64) -> FrameTimingSummary {
         presentation_timing: PresentationTiming::Predictive,
         tick_time: HostTime(1_000),
         predicted_present: Some(HostTime(3_900)),
-        refresh_interval: Some(3_000),
+        refresh_interval: Some(Duration(3_000)),
         demand: FrameDemand::ANIMATION,
         frame_interval: Duration(3_000),
         frame_start: HostTime(1_200),

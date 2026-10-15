@@ -917,7 +917,7 @@ mod tests {
         FrameTick {
             now: HostTime(now),
             predicted_present: None,
-            refresh_interval: Some(REFRESH_INTERVAL.ticks()),
+            refresh_interval: Some(REFRESH_INTERVAL),
             output: OutputId(0),
             prev_actual_present: None,
         }
@@ -944,7 +944,7 @@ mod tests {
         let tick = FrameTick {
             now: HostTime(now),
             predicted_present: Some(HostTime(desired_present)),
-            refresh_interval: Some(REFRESH_INTERVAL.ticks()),
+            refresh_interval: Some(REFRESH_INTERVAL),
             output: OutputId(0),
             prev_actual_present: None,
         };
@@ -983,10 +983,7 @@ mod tests {
 
         assert_eq!(opportunity.tick.now, HostTime(12));
         assert_eq!(opportunity.tick.predicted_present, None);
-        assert_eq!(
-            opportunity.tick.refresh_interval,
-            Some(REFRESH_INTERVAL.ticks())
-        );
+        assert_eq!(opportunity.tick.refresh_interval, Some(REFRESH_INTERVAL));
         assert_eq!(opportunity.tick.output, OutputId(9));
         assert_eq!(
             opportunity.hints.presentation_timing(),

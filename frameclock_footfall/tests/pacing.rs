@@ -24,7 +24,7 @@ fn opportunity(now: u64) -> FrameOpportunity {
     let tick = FrameTick {
         now: HostTime(now),
         predicted_present: Some(HostTime(now + REFRESH)),
-        refresh_interval: Some(REFRESH),
+        refresh_interval: Some(Duration(REFRESH)),
         output: OutputId(0),
         prev_actual_present: None,
     };

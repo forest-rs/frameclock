@@ -4,7 +4,7 @@
 //! `FrameTick` construction from QPC reads.
 
 use frameclock::time::Timebase;
-use frameclock::{FrameTick, HostTime, OutputId};
+use frameclock::{Duration, FrameTick, HostTime, OutputId};
 
 /// Build a [`FrameTick`] from QPC. Call inside a `VSync`-paced tick handler.
 ///
@@ -36,7 +36,7 @@ fn tick_at(
     FrameTick {
         now,
         predicted_present,
-        refresh_interval: (interval_ticks > 0).then_some(interval_ticks),
+        refresh_interval: (interval_ticks > 0).then_some(Duration(interval_ticks)),
         output: OutputId(0),
         prev_actual_present: prev_present_time,
     }
@@ -45,8 +45,8 @@ fn tick_at(
 #[cfg(test)]
 mod tests {
     use super::{make_tick, tick_at};
-    use frameclock::HostTime;
     use frameclock::time::Timebase;
+    use frameclock::{Duration, HostTime};
 
     /// A 10 MHz QPC, the usual frequency: 100 ns per tick.
     const QPC_10_MHZ: Timebase = Timebase::new(1_000_000_000, 10_000_000);
@@ -55,7 +55,7 @@ mod tests {
     fn refresh_interval_is_in_qpc_ticks() {
         let tick = tick_at(HostTime(5_000_000), QPC_10_MHZ, 16_666_667, None);
         // 16.67 ms is 166,666 ticks of 100 ns, not 16,666,667 ticks (1.67 s).
-        assert_eq!(tick.refresh_interval, Some(166_666));
+        assert_eq!(tick.refresh_interval, Some(Duration(166_666)));
         assert_eq!(tick.predicted_present, Some(HostTime(5_166_666)));
     }
 
