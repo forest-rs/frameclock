@@ -179,13 +179,17 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo hack clippy ${{ env.RUST_LINUX_EXCLUDE_PKGS }} ${{ env.RUST_WIN_EXCLUDE_PKGS }} --workspace --locked --optional-deps --each-feature --ignore-unknown-features --features std -- -D warnings
 
-      - name: cargo clippy (auxiliary) (non-macOS)
-        if: runner.os != 'macOS'
-        run: cargo hack clippy ${{ env.RUST_STD_ONLY_PKGS }} --workspace --locked --optional-deps --each-feature --ignore-unknown-features --features std --tests --benches --examples -- -D warnings
+      - name: cargo clippy (auxiliary) (Linux)
+        if: runner.os == 'Linux'
+        run: cargo hack clippy ${{ env.RUST_MAC_EXCLUDE_PKGS }} ${{ env.RUST_WIN_EXCLUDE_PKGS }} --workspace --locked --optional-deps --each-feature --ignore-unknown-features --features std --tests --benches --examples -- -D warnings
+
+      - name: cargo clippy (auxiliary) (Windows)
+        if: runner.os == 'Windows'
+        run: cargo hack clippy ${{ env.RUST_MAC_EXCLUDE_PKGS }} ${{ env.RUST_LINUX_EXCLUDE_PKGS }} --workspace --locked --optional-deps --each-feature --ignore-unknown-features --features std --tests --benches --examples -- -D warnings
 
       - name: cargo clippy (auxiliary) (macOS)
         if: runner.os == 'macOS'
-        run: cargo hack clippy ${{ env.RUST_STD_ONLY_PKGS }} --workspace --locked --optional-deps --each-feature --ignore-unknown-features --features std --tests --benches --examples -- -D warnings
+        run: cargo hack clippy ${{ env.RUST_LINUX_EXCLUDE_PKGS }} ${{ env.RUST_WIN_EXCLUDE_PKGS }} --workspace --locked --optional-deps --each-feature --ignore-unknown-features --features std --tests --benches --examples -- -D warnings
 
   clippy-stable-wasm:
     name: cargo clippy (wasm32)
