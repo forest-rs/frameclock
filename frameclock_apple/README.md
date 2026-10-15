@@ -94,7 +94,8 @@ display_link.start();
 
 The root module exposes the Apple integration surface:
 
-- `CaDisplayLink` and `CvDisplayLink` for the enabled display-link sources.
+- `CaDisplayLink`, `CvDisplayLink`, and `CaMetalDisplayLink` with its
+  `MetalTick` for the enabled display-link sources.
 - `now` and `timebase` for Mach host-time conversion.
 - `wake_at` for a main-thread wake at a host time, for hosts that start
   frames when planned.
@@ -107,7 +108,8 @@ The root module exposes the Apple integration surface:
 - `preferred_frame_rate_range`, `preferred_frame_rate_range_for_frame`, and
   `PreferredFrameRateRange` for translating a selected frame interval into a
   Core Animation-style ProMotion cadence request.
-- `CvDisplayLinkError` with the `cv-display-link` feature on macOS.
+- `CvDisplayLinkError` with the `cv-display-link` feature on macOS, and
+  `CaMetalDisplayLinkError` with the `metal-display-link` feature.
 - `presented_outcome` for turning a Metal drawable's `presentedTime` into a
   `PresentOutcome`.
 
@@ -220,6 +222,92 @@ in seconds; convert them to Mach ticks with `Duration::from_nanos`. Then use
 `CaDisplayLink::set_preferred_frame_interval` to translate a planned
 `FramePlan::frame_interval` into a Core Animation frame-rate range.
 
+## Metal Display Link
+
+With the `metal-display-link` feature, `CaMetalDisplayLink` drives a
+`CAMetalLayer` (macOS 14, iOS 17, or later; `new` returns
+`CaMetalDisplayLinkError::Unavailable` before that). Each update arrives as a
+`MetalTick` with the drawable to render into, and builds its own
+`FrameOpportunity`: the update's `targetPresentationTimestamp` is the frame's
+predicted present, its `targetTimestamp` is the deadline to call `present` by,
+and frames start at the update, since the drawable arrives with it.
+
+The link calls back on the run loop of the thread that starts it, so a render
+thread can own the driver and the renderer. Its frames are shown after their
+GPU work, so each one is reported: submit with `CaMetalDisplayLink::FEEDBACK_MODE`
+and report the drawable's `presentedTime` through `FrameDriver::report_frame`,
+converted with `presented_outcome`. Metal calls presented handlers on its own
+thread, so send each frame's presented time back to the thread that owns the
+driver:
+
+```rust,ignore
+use std::ptr::NonNull;
+use std::sync::mpsc;
+
+use block2::RcBlock;
+use frameclock::{FrameBeginResult, FrameDemand, FrameDriver, FrameReport, OutputId};
+use frameclock_apple::CaMetalDisplayLink;
+use objc2::runtime::ProtocolObject;
+use objc2_metal::{MTLCommandBuffer, MTLCommandQueue, MTLDrawable};
+
+// `layer` is the view's `CAMetalLayer`, and `queue` a command queue on its
+// device.
+let mut driver = FrameDriver::new(frameclock_apple::scheduler_config());
+let display_timing = frameclock_apple::default_display_timing();
+let (presented_tx, presented_rx) = mpsc::channel::<(u64, f64)>();
+
+let link = CaMetalDisplayLink::new(
+    &layer,
+    move |update| {
+        // Report the frames whose presented handlers have run.
+        for (frame_index, presented_time) in presented_rx.try_iter() {
+            let outcome = frameclock_apple::presented_outcome(presented_time);
+            let _ = driver.report_frame(frame_index, FrameReport { work: None, outcome });
+        }
+
+        driver.request(FrameDemand::ANIMATION);
+        let begin = driver.begin_frame(update.frame_opportunity(display_timing));
+        if let FrameBeginResult::Ready(frame) = begin.result {
+            let frame_index = frame.plan().frame_index;
+            let drawable = update.drawable();
+            let presented_tx = presented_tx.clone();
+            let presented = RcBlock::new(move |drawable: NonNull<ProtocolObject<dyn MTLDrawable>>| {
+                let time = unsafe { drawable.as_ref() }.presentedTime();
+                let _ = presented_tx.send((frame_index, time));
+            });
+            unsafe { drawable.addPresentedHandler(RcBlock::as_ptr(&presented)) };
+
+            // Encode rendering into drawable.texture() for frame.sample_time().
+            let commands = queue.commandBuffer().unwrap();
+            commands.presentDrawable(ProtocolObject::from_ref(&*drawable));
+            commands.commit();
+            let submission = CaMetalDisplayLink::FEEDBACK_MODE.submission(CaMetalDisplayLink::now());
+            let _ = driver.submit_frame(frame, submission);
+        }
+    },
+    OutputId(0),
+)?;
+link.start();
+```
+
+Present with plain `present` or `presentDrawable`: Core Animation asserts on
+the timed variants, such as `presentDrawable:atTime:`, for this link's
+drawables. The update's deadline is hard: pipeline depth never extends it, it
+holds even when the update's target is stale, and an update that arrives after
+its deadline returns `Expired`. Leave that update's
+drawable unpresented, as for a frame the cadence holds back, which returns
+`Wait(FrameWait::NextTick)`. Run live on a 120 Hz Mac for two
+seconds, this loop drew every update with none expired, every frame was
+committed before its deadline, and frames were shown within a fraction of a
+millisecond of their target; background demand drew every other update, and
+the link kept ticking past the drawables it skipped.
+
+`preferred_frame_latency` asks for how many frames ahead each update comes,
+but macOS may use more. On that Mac it made no difference at 1 or 2: in a
+window the target came about 41 ms, five refreshes, after each update, and in
+full screen about 16 ms, two refreshes. Either way frames were shown within
+0.01 ms of the link's target, so frameclock learned no extra present latency.
+
 ## Feature Flags
 
 - `ca-display-link`: enables `CADisplayLink` support and is enabled by
@@ -227,9 +315,10 @@ in seconds; convert them to Mach ticks with `Duration::from_nanos`. Then use
 - `cv-display-link`: enables legacy `CVDisplayLink` support on macOS, for
   hosts that need a Core Video display link. Its ticks are forwarded from the
   Core Video thread to the main thread.
+- `metal-display-link`: enables `CAMetalDisplayLink` support, for Metal
+  renderers that want each frame's drawable, deadline, and target together.
 
-The features are independent, so enabling one never removes the other's
-types.
+The features are independent, so enabling one never removes another's types.
 
 This crate keeps its own implementation `no_std`, but the selected Objective-C
 framework bindings currently require `std`. It is validated on supported Apple
