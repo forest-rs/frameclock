@@ -50,7 +50,7 @@ pub fn now() -> HostTime {
 
 /// Returns the browser [`Timebase`].
 ///
-/// `Timebase { numer: 1000, denom: 1 }` means `nanoseconds = ticks * 1000`.
+/// `Timebase::new(1000, 1)` means `nanoseconds = ticks * 1000`.
 #[must_use]
 pub const fn timebase() -> Timebase {
     TIMEBASE

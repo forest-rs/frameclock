@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn mach_timebase_available() {
         let tb = mach_time::timebase();
-        assert!(tb.numer > 0, "timebase numerator must be non-zero");
-        assert!(tb.denom > 0, "timebase denominator must be non-zero");
+        assert!(tb.numer() > 0, "timebase numerator must be non-zero");
+        assert!(tb.denom() > 0, "timebase denominator must be non-zero");
     }
 }
