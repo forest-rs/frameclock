@@ -12,7 +12,9 @@ use core::ptr::NonNull;
 use frameclock::time::Timebase;
 use frameclock::{Duration, FrameTick, HostTime, OutputId};
 use objc2_core_foundation::CFRetained;
-use objc2_core_video::{CVDisplayLink as CVDisplayLinkRaw, CVTimeStamp, kCVReturnSuccess};
+use objc2_core_video::{
+    CVDisplayLink as CVDisplayLinkRaw, CVTimeStamp, CVTimeStampFlags, kCVReturnSuccess,
+};
 
 use crate::threading::TickSender;
 
@@ -47,6 +49,7 @@ impl core::error::Error for DisplayLinkError {}
 struct CallbackState {
     sender: TickSender,
     output: OutputId,
+    timebase: Timebase,
 }
 
 /// Safe wrapper around `CVDisplayLink` that produces [`FrameTick`] events.
@@ -86,7 +89,11 @@ impl DisplayLink {
         reason = "CVDisplayLink API is deprecated by Apple but still functional"
     )]
     pub fn new(sender: TickSender, output: OutputId) -> Result<Self, DisplayLinkError> {
-        let state = Box::pin(CallbackState { sender, output });
+        let state = Box::pin(CallbackState {
+            sender,
+            output,
+            timebase: crate::mach_time::timebase(),
+        });
 
         let mut link_ptr: *mut CVDisplayLinkRaw = core::ptr::null_mut();
         let ret = unsafe {
@@ -205,16 +212,21 @@ unsafe extern "C-unwind" fn display_link_callback(
     let out_ts = unsafe { in_output_time.as_ref() };
 
     let now = HostTime(now_ts.hostTime);
-    let predicted_present = HostTime(out_ts.hostTime);
-    let refresh_interval = if out_ts.hostTime > now_ts.hostTime {
-        Some(Duration(out_ts.hostTime - now_ts.hostTime))
-    } else {
-        None
-    };
+    let predicted_present = has_flag(out_ts.flags, CVTimeStampFlags::HostTimeValid)
+        .then_some(HostTime(out_ts.hostTime));
+    // The output time is when the next frame is shown, not one refresh
+    // after `now`: their difference is output latency, so the refresh
+    // interval comes from the display's own refresh period.
+    let refresh_interval = refresh_interval(
+        out_ts.flags,
+        out_ts.videoRefreshPeriod,
+        out_ts.videoTimeScale,
+        state.timebase,
+    );
 
     let tick = FrameTick {
         now,
-        predicted_present: Some(predicted_present),
+        predicted_present,
         refresh_interval,
         output: state.output,
         prev_actual_present: None,
@@ -223,4 +235,67 @@ unsafe extern "C-unwind" fn display_link_callback(
     state.sender.send(tick);
 
     kCVReturnSuccess
+}
+
+const fn has_flag(flags: u64, flag: CVTimeStampFlags) -> bool {
+    flags & flag.0 == flag.0
+}
+
+/// Converts a `CVTimeStamp` refresh period, in `time_scale` units per
+/// second, to host ticks of `timebase`.
+///
+/// Returns `None` unless the timestamp marks the period valid and both
+/// terms are positive.
+fn refresh_interval(
+    flags: u64,
+    period: i64,
+    time_scale: i32,
+    timebase: Timebase,
+) -> Option<Duration> {
+    if !has_flag(flags, CVTimeStampFlags::VideoRefreshPeriodValid) {
+        return None;
+    }
+    let period = u128::try_from(period).ok().filter(|period| *period > 0)?;
+    let time_scale = u128::try_from(time_scale).ok().filter(|scale| *scale > 0)?;
+    // ticks = seconds * 1e9 * denom / numer, in one step so nothing rounds
+    // through nanoseconds.
+    let ticks = period * 1_000_000_000 * u128::from(timebase.denom())
+        / (time_scale * u128::from(timebase.numer()));
+    let ticks = u64::try_from(ticks).unwrap_or(u64::MAX);
+    (ticks > 0).then_some(Duration(ticks))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const REFRESH_VALID: u64 = CVTimeStampFlags::VideoRefreshPeriodValid.0;
+
+    #[test]
+    fn refresh_interval_comes_from_the_refresh_period() {
+        // 120 Hz in Mach ticks of a 24 MHz timebase.
+        let mach = Timebase::new(125, 3);
+        assert_eq!(
+            refresh_interval(REFRESH_VALID, 1, 120, mach),
+            Some(Duration(200_000))
+        );
+        assert_eq!(
+            refresh_interval(REFRESH_VALID, 200_000, 24_000_000, mach),
+            Some(Duration(200_000))
+        );
+        // 60 Hz on a nanosecond timebase.
+        assert_eq!(
+            refresh_interval(REFRESH_VALID, 1, 60, Timebase::NANOS),
+            Some(Duration(16_666_666))
+        );
+    }
+
+    #[test]
+    fn refresh_interval_requires_a_valid_positive_period() {
+        let tb = Timebase::NANOS;
+        assert_eq!(refresh_interval(0, 1, 60, tb), None);
+        assert_eq!(refresh_interval(REFRESH_VALID, 0, 60, tb), None);
+        assert_eq!(refresh_interval(REFRESH_VALID, -1, 60, tb), None);
+        assert_eq!(refresh_interval(REFRESH_VALID, 1, 0, tb), None);
+    }
 }
