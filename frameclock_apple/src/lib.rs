@@ -9,6 +9,10 @@
 //! into [`FrameOpportunity`] values for callers that own a
 //! [`frameclock::FrameDriver`].
 //!
+//! The `ca-display-link` feature (on by default) provides `CaDisplayLink`
+//! and the `cv-display-link` feature provides `CvDisplayLink` on macOS. The
+//! features are independent: enable either or both.
+//!
 //! It intentionally does not own `CALayer` trees, `CAMetalLayer` presentation,
 //! renderers, windows, or app event-loop policy.
 //!
@@ -27,21 +31,18 @@ extern crate alloc;
 
 mod mach_time;
 
-#[cfg(all(feature = "cv-display-link", not(feature = "ca-display-link")))]
+#[cfg(feature = "ca-display-link")]
+mod ca_display_link;
+#[cfg(all(feature = "cv-display-link", target_os = "macos"))]
 mod cv_display_link;
-#[cfg(all(feature = "cv-display-link", not(feature = "ca-display-link")))]
+#[cfg(all(feature = "cv-display-link", target_os = "macos"))]
 mod threading;
 
 #[cfg(feature = "ca-display-link")]
-mod ca_display_link;
-
-#[cfg(feature = "ca-display-link")]
-pub use ca_display_link::DisplayLink;
-#[cfg(all(feature = "cv-display-link", not(feature = "ca-display-link")))]
-pub use cv_display_link::DisplayLink;
-#[cfg(all(feature = "cv-display-link", not(feature = "ca-display-link")))]
-pub use cv_display_link::DisplayLinkError;
-#[cfg(all(feature = "cv-display-link", not(feature = "ca-display-link")))]
+pub use ca_display_link::CaDisplayLink;
+#[cfg(all(feature = "cv-display-link", target_os = "macos"))]
+pub use cv_display_link::{CvDisplayLink, CvDisplayLinkError};
+#[cfg(all(feature = "cv-display-link", target_os = "macos"))]
 pub use threading::{TickForwarder, TickSender};
 
 use frameclock::time::Timebase;
@@ -196,14 +197,6 @@ impl AppleFeedbackMode {
         }
     }
 }
-
-/// Feedback mode for the enabled [`DisplayLink`] implementation.
-#[cfg(feature = "ca-display-link")]
-pub const DEFAULT_FEEDBACK_MODE: AppleFeedbackMode = AppleFeedbackMode::DeferredActualPresent;
-
-/// Feedback mode for the enabled [`DisplayLink`] implementation.
-#[cfg(all(feature = "cv-display-link", not(feature = "ca-display-link")))]
-pub const DEFAULT_FEEDBACK_MODE: AppleFeedbackMode = AppleFeedbackMode::CommitOnly;
 
 /// Preferred Core Animation frame-rate range.
 ///

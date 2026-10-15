@@ -16,11 +16,12 @@ use objc2_core_video::{
     CVDisplayLink as CVDisplayLinkRaw, CVTimeStamp, CVTimeStampFlags, kCVReturnSuccess,
 };
 
+use crate::AppleFeedbackMode;
 use crate::threading::TickSender;
 
-/// Errors from [`DisplayLink`] operations.
+/// Errors from [`CvDisplayLink`] operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DisplayLinkError {
+pub enum CvDisplayLinkError {
     /// `CVDisplayLinkCreateWithActiveCGDisplays` failed.
     CreateFailed(i32),
     /// `CVDisplayLinkSetOutputCallback` failed.
@@ -31,7 +32,7 @@ pub enum DisplayLinkError {
     StopFailed(i32),
 }
 
-impl fmt::Display for DisplayLinkError {
+impl fmt::Display for CvDisplayLinkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::CreateFailed(code) => write!(f, "CVDisplayLink creation failed ({code})"),
@@ -44,7 +45,7 @@ impl fmt::Display for DisplayLinkError {
     }
 }
 
-impl core::error::Error for DisplayLinkError {}
+impl core::error::Error for CvDisplayLinkError {}
 
 struct CallbackState {
     sender: TickSender,
@@ -53,20 +54,24 @@ struct CallbackState {
 }
 
 /// Safe wrapper around `CVDisplayLink` that produces [`FrameTick`] events.
-pub struct DisplayLink {
+pub struct CvDisplayLink {
     raw: CFRetained<CVDisplayLinkRaw>,
     _state: Pin<Box<CallbackState>>,
 }
 
-impl fmt::Debug for DisplayLink {
+impl fmt::Debug for CvDisplayLink {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DisplayLink")
+        f.debug_struct("CvDisplayLink")
             .field("output", &self._state.output)
             .finish_non_exhaustive()
     }
 }
 
-impl DisplayLink {
+impl CvDisplayLink {
+    /// The presentation feedback this display link provides: none, since
+    /// its ticks carry no actual-present time.
+    pub const FEEDBACK_MODE: AppleFeedbackMode = AppleFeedbackMode::CommitOnly;
+
     /// Returns the Mach absolute time timebase.
     #[must_use]
     pub fn timebase() -> Timebase {
@@ -83,12 +88,12 @@ impl DisplayLink {
     ///
     /// # Errors
     ///
-    /// Returns [`DisplayLinkError`] if the underlying `CoreVideo` calls fail.
+    /// Returns [`CvDisplayLinkError`] if the underlying `CoreVideo` calls fail.
     #[expect(
         deprecated,
         reason = "CVDisplayLink API is deprecated by Apple but still functional"
     )]
-    pub fn new(sender: TickSender, output: OutputId) -> Result<Self, DisplayLinkError> {
+    pub fn new(sender: TickSender, output: OutputId) -> Result<Self, CvDisplayLinkError> {
         let state = Box::pin(CallbackState {
             sender,
             output,
@@ -100,9 +105,9 @@ impl DisplayLink {
             CVDisplayLinkRaw::create_with_active_cg_displays(NonNull::new_unchecked(&mut link_ptr))
         };
         if ret != kCVReturnSuccess {
-            return Err(DisplayLinkError::CreateFailed(ret));
+            return Err(CvDisplayLinkError::CreateFailed(ret));
         }
-        let raw_nn = NonNull::new(link_ptr).ok_or(DisplayLinkError::CreateFailed(ret))?;
+        let raw_nn = NonNull::new(link_ptr).ok_or(CvDisplayLinkError::CreateFailed(ret))?;
         let raw = unsafe { CFRetained::from_raw(raw_nn) };
 
         let state_ptr: *const CallbackState = &*state;
@@ -110,7 +115,7 @@ impl DisplayLink {
             raw.set_output_callback(Some(display_link_callback), state_ptr as *mut c_void)
         };
         if ret != kCVReturnSuccess {
-            return Err(DisplayLinkError::CallbackFailed(ret));
+            return Err(CvDisplayLinkError::CallbackFailed(ret));
         }
 
         Ok(Self { raw, _state: state })
@@ -120,15 +125,15 @@ impl DisplayLink {
     ///
     /// # Errors
     ///
-    /// Returns [`DisplayLinkError::StartFailed`] if `CoreVideo` reports an error.
+    /// Returns [`CvDisplayLinkError::StartFailed`] if `CoreVideo` reports an error.
     #[expect(
         deprecated,
         reason = "CVDisplayLink API is deprecated by Apple but still functional"
     )]
-    pub fn start(&self) -> Result<(), DisplayLinkError> {
+    pub fn start(&self) -> Result<(), CvDisplayLinkError> {
         let ret = self.raw.start();
         if ret != kCVReturnSuccess {
-            return Err(DisplayLinkError::StartFailed(ret));
+            return Err(CvDisplayLinkError::StartFailed(ret));
         }
         Ok(())
     }
@@ -137,15 +142,15 @@ impl DisplayLink {
     ///
     /// # Errors
     ///
-    /// Returns [`DisplayLinkError::StopFailed`] if `CoreVideo` reports an error.
+    /// Returns [`CvDisplayLinkError::StopFailed`] if `CoreVideo` reports an error.
     #[expect(
         deprecated,
         reason = "CVDisplayLink API is deprecated by Apple but still functional"
     )]
-    pub fn stop(&self) -> Result<(), DisplayLinkError> {
+    pub fn stop(&self) -> Result<(), CvDisplayLinkError> {
         let ret = self.raw.stop();
         if ret != kCVReturnSuccess {
-            return Err(DisplayLinkError::StopFailed(ret));
+            return Err(CvDisplayLinkError::StopFailed(ret));
         }
         Ok(())
     }
@@ -170,13 +175,13 @@ impl DisplayLink {
     ///
     /// # Errors
     ///
-    /// Returns [`DisplayLinkError`] if Core Video reports an error while starting
+    /// Returns [`CvDisplayLinkError`] if Core Video reports an error while starting
     /// or stopping the link.
     #[expect(
         deprecated,
         reason = "CVDisplayLink API is deprecated by Apple but still functional"
     )]
-    pub fn set_paused(&self, paused: bool) -> Result<(), DisplayLinkError> {
+    pub fn set_paused(&self, paused: bool) -> Result<(), CvDisplayLinkError> {
         let running = self.raw.is_running();
         match (paused, running) {
             (true, true) => self.stop(),
@@ -186,7 +191,7 @@ impl DisplayLink {
     }
 }
 
-impl Drop for DisplayLink {
+impl Drop for CvDisplayLink {
     #[expect(
         deprecated,
         reason = "CVDisplayLink API is deprecated by Apple but still functional"
