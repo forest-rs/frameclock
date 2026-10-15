@@ -38,21 +38,25 @@ and where the rendered output is submitted.
 
 Browser RAF does not expose a portable predicted present timestamp, commit
 deadline, or current display refresh interval. `frame_opportunity` creates
-pacing-only `FrameOpportunity` values and uses a fallback refresh interval for
-display timing. The default fallback is
-`DEFAULT_REFRESH_INTERVAL`, a 60 Hz interval in microsecond ticks.
+pacing-only `FrameOpportunity` values from a fallback `DisplayTiming` for the
+output. `default_display_timing` is fixed at `DEFAULT_REFRESH_INTERVAL`, a
+60 Hz interval in microsecond ticks. A host that knows the output's
+variable-refresh range can pass `DisplayTiming::variable` instead; it is kept
+as is.
 
 ```rust,ignore
 use frameclock::{FrameBeginResult, FrameDemand, FrameDriver, FrameSubmission, OutputId};
-use frameclock_web::{DEFAULT_REFRESH_INTERVAL, RafLoop};
+use frameclock_web::RafLoop;
 
 let mut driver = FrameDriver::new(frameclock_web::scheduler_config());
+// 60 Hz in microsecond ticks; browsers report no refresh interval.
+let display_timing = frameclock_web::default_display_timing();
 
 let raf = RafLoop::new(
     move |tick| {
         driver.request(FrameDemand::ANIMATION);
 
-        let opportunity = frameclock_web::frame_opportunity(tick, DEFAULT_REFRESH_INTERVAL);
+        let opportunity = frameclock_web::frame_opportunity(tick, display_timing);
         let begin = driver.begin_frame(opportunity);
         match begin.result {
             FrameBeginResult::Ready(frame) => {
@@ -89,7 +93,8 @@ The root module exposes the browser integration surface:
 - `scheduler_config` for the `SchedulerConfig` that matches these ticks.
 - `present_hints`, `display_timing`, and `frame_opportunity`, plus
   `_with_commit_lead` variants, for hosts that own `FrameDriver` directly.
-- `DEFAULT_REFRESH_INTERVAL` for conservative pacing fallback.
+- `default_display_timing` and `DEFAULT_REFRESH_INTERVAL` for conservative
+  pacing fallback.
 
 `frameclock_web` keeps platform-specific browser code out of `frameclock`
 proper. Core scheduling policy, frame demand ordering, frame summaries, and
