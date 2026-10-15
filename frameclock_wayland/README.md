@@ -81,14 +81,29 @@ ticker.on_callback_done(clock, OutputId(0));
 // After dispatch, plan frames for the queued ticks.
 while let Some(tick) = ticker.poll_tick() {
     let opportunity = frameclock_wayland::frame_opportunity(tick, display_timing);
-    if let FrameBeginResult::Ready(frame) = driver.begin_frame(opportunity).result {
-        // Render for frame.sample_time(), request wp_presentation feedback,
-        // attach the buffer, and commit.
-        let id = SubmissionId(next_commit);
-        next_commit += 1;
-        in_flight.push((id, frame.plan().frame_index));
-        _ = driver.submit_frame(frame, FrameSubmission::reported(clock.now()));
+    match driver.begin_frame(opportunity).result {
+        FrameBeginResult::Ready(frame) => {
+            // Render for frame.sample_time(), request wp_presentation
+            // feedback, attach the buffer, and commit.
+            let id = SubmissionId(next_commit);
+            next_commit += 1;
+            in_flight.push((id, frame.plan().frame_index));
+            _ = driver.submit_frame(frame, FrameSubmission::reported(clock.now()));
+        }
+        // The cadence starts this frame at a later callback.
+        FrameBeginResult::Wait(_) => {}
+        FrameBeginResult::Expired(summary) => {
+            // Record the dropped-frame summary.
+            _ = summary;
+        }
+        FrameBeginResult::Idle => {}
     }
+}
+
+// Keep callbacks coming while frame work waits for one.
+if driver.needs_tick() && ticker.mark_callback_requested() {
+    // Send wl_surface.frame. It takes effect on the next commit, so commit
+    // without a new buffer if this turn drew nothing.
 }
 
 // Push each decoded wp_presentation_feedback event into `feedback`, then:
@@ -112,6 +127,15 @@ while let Some(event) = feedback.pop() {
 Use `scheduler_config` for the `FrameDriver`: it is
 `SchedulerConfig::estimated` in nanoseconds, matching the estimated hints
 `frame_opportunity` builds once feedback has established a cadence.
+
+The hints start each frame at a frame callback, so the host is handed ready
+frames there and never has to wake itself. A frame the cadence holds back
+returns `Wait(FrameWait::NextTick)` and is ready at the later callback it
+waits for, so keep requesting callbacks while `FrameDriver::needs_tick` is
+true. A host with its own timer can start frames nearer their deadline
+instead: mark the hints `starting_when_planned`, wake at the time
+`Wait(FrameWait::Until(time))` gives, and call
+`FrameDriver::begin_pending_frame`.
 
 ## Submitting Frames
 

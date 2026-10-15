@@ -67,20 +67,42 @@ ticker.on_complete_notify(Clock::Monotonic, ust, msc);
 // After dispatch, plan frames for the queued ticks.
 while let Some(tick) = ticker.poll_tick() {
     let opportunity = frameclock_x11::frame_opportunity(tick, display_timing);
-    if let FrameBeginResult::Ready(frame) = driver.begin_frame(opportunity).result {
-        // Render for frame.sample_time() and present through the swapchain.
-        let submit = driver.submit_frame(
-            frame,
-            FrameSubmission::new(frameclock_x11::now(), None),
-        );
-        _ = submit.summary;
+    match driver.begin_frame(opportunity).result {
+        FrameBeginResult::Ready(frame) => {
+            // Render for frame.sample_time() and present through the swapchain.
+            let submit = driver.submit_frame(
+                frame,
+                FrameSubmission::new(frameclock_x11::now(), None),
+            );
+            _ = submit.summary;
+        }
+        // The cadence starts this frame at a later vblank.
+        FrameBeginResult::Wait(_) => {}
+        FrameBeginResult::Expired(summary) => {
+            // Record the dropped-frame summary.
+            _ = summary;
+        }
+        FrameBeginResult::Idle => {}
     }
+}
+
+// Keep notifies coming while frame work waits for one.
+if driver.needs_tick() && ticker.mark_notify_requested() {
+    // Send PresentNotifyMSC(window, serial, 0, 1, 0).
 }
 ```
 
 Use `scheduler_config` for the `FrameDriver`: it is
 `SchedulerConfig::estimated` in nanoseconds, matching the estimated hints
 `frame_opportunity` builds once two completions have established a cadence.
+
+The hints start each frame at a vblank notify, so the host is handed ready
+frames there and never has to wake itself. A frame the cadence holds back
+returns `Wait(FrameWait::NextTick)` and is ready at the later vblank it waits
+for, so keep arming notifies while `FrameDriver::needs_tick` is true. A host
+with its own timer can start frames nearer their deadline instead: mark the
+hints `starting_when_planned`, wake at the time `Wait(FrameWait::Until(time))`
+gives, and call `FrameDriver::begin_pending_frame`.
 
 ## Variable Refresh
 
