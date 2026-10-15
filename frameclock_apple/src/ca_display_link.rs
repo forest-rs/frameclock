@@ -4,7 +4,7 @@
 //! `CADisplayLink` integration for predictive frame timing.
 
 use alloc::boxed::Box;
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use core::fmt;
 
 use frameclock::time::Timebase;
@@ -18,7 +18,7 @@ use objc2_quartz_core::{CACurrentMediaTime, CADisplayLink as CADisplayLinkRaw, C
 use crate::{AppleFeedbackMode, PreferredFrameRateRange, mach_time, preferred_frame_rate_range};
 
 struct DisplayLinkTargetIvars {
-    callback: Box<dyn Fn(FrameTick)>,
+    callback: RefCell<Box<dyn FnMut(FrameTick)>>,
     has_previous_timestamp: Cell<bool>,
     output: OutputId,
     timebase: Timebase,
@@ -44,11 +44,11 @@ define_class! {
 impl DisplayLinkTarget {
     fn new<F>(callback: F, output: OutputId, mtm: MainThreadMarker) -> Retained<Self>
     where
-        F: Fn(FrameTick) + 'static,
+        F: FnMut(FrameTick) + 'static,
     {
         let tb = mach_time::timebase();
         let this = mtm.alloc::<Self>().set_ivars(DisplayLinkTargetIvars {
-            callback: Box::new(callback),
+            callback: RefCell::new(Box::new(callback)),
             has_previous_timestamp: Cell::new(false),
             output,
             timebase: tb,
@@ -94,7 +94,9 @@ impl DisplayLinkTarget {
             prev_actual_present,
         };
 
-        (ivars.callback)(tick);
+        if let Ok(mut callback) = ivars.callback.try_borrow_mut() {
+            callback(tick);
+        }
     }
 }
 
@@ -134,10 +136,12 @@ impl CaDisplayLink {
     /// Creates a new display link with the given callback.
     ///
     /// The link is created but not started. Call [`start`](Self::start) to
-    /// begin receiving ticks on the main run loop.
+    /// begin receiving ticks on the main run loop. A tick that arrives while
+    /// the callback is still running, such as from a nested run loop inside
+    /// it, is dropped.
     pub fn new<F>(callback: F, output: OutputId, mtm: MainThreadMarker) -> Self
     where
-        F: Fn(FrameTick) + 'static,
+        F: FnMut(FrameTick) + 'static,
     {
         let target = DisplayLinkTarget::new(callback, output, mtm);
 

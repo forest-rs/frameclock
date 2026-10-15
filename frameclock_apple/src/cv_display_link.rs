@@ -4,20 +4,24 @@
 //! `CVDisplayLink` integration for predictive frame timing.
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
+use core::cell::RefCell;
 use core::ffi::c_void;
 use core::fmt;
+use core::marker::PhantomData;
 use core::pin::Pin;
 use core::ptr::NonNull;
 
+use dispatch2::{DispatchQueue, MainThreadBound};
 use frameclock::time::Timebase;
 use frameclock::{Duration, FrameTick, HostTime, OutputId};
+use objc2::MainThreadMarker;
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::{
     CVDisplayLink as CVDisplayLinkRaw, CVTimeStamp, CVTimeStampFlags, kCVReturnSuccess,
 };
 
 use crate::AppleFeedbackMode;
-use crate::threading::TickSender;
 
 /// Errors from [`CvDisplayLink`] operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,16 +51,28 @@ impl fmt::Display for CvDisplayLinkError {
 
 impl core::error::Error for CvDisplayLinkError {}
 
+/// The host callback, shared with the display-link thread but only ever
+/// borrowed on the main thread.
+type MainThreadCallback = Arc<MainThreadBound<RefCell<Box<dyn FnMut(FrameTick)>>>>;
+
 struct CallbackState {
-    sender: TickSender,
+    callback: MainThreadCallback,
     output: OutputId,
     timebase: Timebase,
 }
 
-/// Safe wrapper around `CVDisplayLink` that produces [`FrameTick`] events.
+/// Safe wrapper around `CVDisplayLink` that produces [`FrameTick`] events on
+/// the main thread.
+///
+/// Core Video calls the display link on its own thread. Each tick is
+/// dispatched to the main queue and passed to the callback there, so the
+/// callback can own main-thread state without `Send` or `Sync`.
 pub struct CvDisplayLink {
     raw: CFRetained<CVDisplayLinkRaw>,
     _state: Pin<Box<CallbackState>>,
+    /// The callback must be dropped on the main thread, so the link stays
+    /// there too.
+    _main_thread: PhantomData<MainThreadMarker>,
 }
 
 impl fmt::Debug for CvDisplayLink {
@@ -86,6 +102,11 @@ impl CvDisplayLink {
 
     /// Creates a new display link targeting all active displays.
     ///
+    /// The link is created but not started. Once it is started, `callback`
+    /// receives each tick on the main thread, from the main dispatch queue.
+    /// A tick that arrives while the callback is still running, such as from
+    /// a nested run loop inside it, is dropped.
+    ///
     /// # Errors
     ///
     /// Returns [`CvDisplayLinkError`] if the underlying `CoreVideo` calls fail.
@@ -93,9 +114,17 @@ impl CvDisplayLink {
         deprecated,
         reason = "CVDisplayLink API is deprecated by Apple but still functional"
     )]
-    pub fn new(sender: TickSender, output: OutputId) -> Result<Self, CvDisplayLinkError> {
+    pub fn new<F>(
+        callback: F,
+        output: OutputId,
+        mtm: MainThreadMarker,
+    ) -> Result<Self, CvDisplayLinkError>
+    where
+        F: FnMut(FrameTick) + 'static,
+    {
+        let callback: Box<dyn FnMut(FrameTick)> = Box::new(callback);
         let state = Box::pin(CallbackState {
-            sender,
+            callback: Arc::new(MainThreadBound::new(RefCell::new(callback), mtm)),
             output,
             timebase: crate::mach_time::timebase(),
         });
@@ -118,7 +147,11 @@ impl CvDisplayLink {
             return Err(CvDisplayLinkError::CallbackFailed(ret));
         }
 
-        Ok(Self { raw, _state: state })
+        Ok(Self {
+            raw,
+            _state: state,
+            _main_thread: PhantomData,
+        })
     }
 
     /// Starts the display link.
@@ -237,7 +270,14 @@ unsafe extern "C-unwind" fn display_link_callback(
         prev_actual_present: None,
     };
 
-    state.sender.send(tick);
+    let callback = Arc::clone(&state.callback);
+    DispatchQueue::main().exec_async(move || {
+        // SAFETY: Work submitted to the main queue runs on the main thread.
+        let mtm = unsafe { MainThreadMarker::new_unchecked() };
+        if let Ok(mut callback) = callback.get(mtm).try_borrow_mut() {
+            callback(tick);
+        }
+    });
 
     kCVReturnSuccess
 }
