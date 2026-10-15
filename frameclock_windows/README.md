@@ -107,11 +107,25 @@ the last observed gap; fixed timing is refined from the tick.
 ## Submitting Frames
 
 A swapchain present tells the host nothing about when the frame was shown, so
-submit with `FrameSubmission::new(submitted_at, None)`. A host that reads
-`IDXGISwapChain::GetFrameStatistics` can match each `PresentCount` to the frame
-it presented: submit with `FrameSubmission::reported(submitted_at)` and report
-`PresentOutcome::Presented(HostTime(SyncQPCTime))` through
-`FrameDriver::report_frame`. The `frameclock` README's "Submitting Frames"
+submit with `FrameSubmission::new(submitted_at, None)`.
+
+A flip-model swapchain's `IDXGISwapChain::GetFrameStatistics` says when its
+last presented image reached the screen. Submit with
+`FrameSubmission::reported(submitted_at)` and keep each frame's present count,
+from `GetLastPresentCount` right after its `Present`, with its
+`FramePlan::frame_index`. The statistics' `PresentCount` names the frame they
+describe. Its present time is not `SyncQPCTime`, which is a sample taken at
+v-blank `SyncRefreshCount`; the image reached the screen at v-blank
+`PresentRefreshCount`, which can be an earlier one. Convert with
+`present_time_from_statistics(PresentRefreshCount, SyncRefreshCount,
+HostTime(SyncQPCTime), refresh)` and report
+`PresentOutcome::Presented(present_time)` through `FrameDriver::report_frame`.
+The conversion assumes every v-blank between the two counts lasted `refresh`.
+On a variable-refresh output that does not hold, so report a present time only
+when `PresentRefreshCount` equals `SyncRefreshCount`, and
+`PresentOutcome::Unknown` otherwise. The statistics describe only the latest
+image, so report any earlier frames they skipped over as
+`PresentOutcome::Unknown` too. The `frameclock` README's "Submitting Frames"
 table summarizes the choice.
 
 ## Timing Model

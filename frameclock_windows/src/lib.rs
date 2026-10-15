@@ -38,7 +38,7 @@ pub use time::{now, timebase};
 
 use frameclock::timing::{PresentationTiming, default_commit_lead};
 use frameclock::{
-    DisplayTiming, Duration, FrameOpportunity, FrameTick, PresentHints, SchedulerConfig,
+    DisplayTiming, Duration, FrameOpportunity, FrameTick, HostTime, PresentHints, SchedulerConfig,
 };
 
 /// Returns the scheduler configuration for Windows ticks.
@@ -60,6 +60,43 @@ pub fn scheduler_config() -> SchedulerConfig {
 #[must_use]
 pub fn default_display_timing() -> DisplayTiming {
     DisplayTiming::fixed(Duration::from_nanos(16_666_667, timebase()))
+}
+
+/// Returns when the last image a swapchain presented reached the screen,
+/// from its `DXGI_FRAME_STATISTICS`.
+///
+/// The statistics describe the image numbered `PresentCount`, which reached
+/// the screen at v-blank `PresentRefreshCount`. `SyncQPCTime` is not that
+/// time: it is a QPC sample taken at v-blank `SyncRefreshCount`, which can be
+/// a later one. This moves the sample back, or forward, by the v-blanks
+/// between the two counts. Pass the counts as DXGI reports them, the sample
+/// as `HostTime(SyncQPCTime)`, and the refresh interval in QPC ticks; the
+/// counts may wrap.
+///
+/// Every v-blank between the two counts must have lasted
+/// `refresh_interval`, as on a fixed-refresh output. On a variable-refresh
+/// output they can differ, and one interval cannot reconstruct them: the
+/// result is exact only when the two counts are equal.
+#[must_use]
+pub fn present_time_from_statistics(
+    present_refresh_count: u32,
+    sync_refresh_count: u32,
+    sync_qpc_time: HostTime,
+    refresh_interval: Duration,
+) -> HostTime {
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "the counts are a few v-blanks apart, so their wrapping difference fits"
+    )]
+    let vblanks_after_present = sync_refresh_count.wrapping_sub(present_refresh_count) as i32;
+    let shift = refresh_interval.saturating_mul(u64::from(vblanks_after_present.unsigned_abs()));
+    if vblanks_after_present >= 0 {
+        sync_qpc_time.checked_sub(shift).unwrap_or(HostTime(0))
+    } else {
+        sync_qpc_time
+            .checked_add(shift)
+            .unwrap_or(HostTime(u64::MAX))
+    }
 }
 
 /// Computes [`PresentHints`] from a Windows [`FrameTick`] using
@@ -151,7 +188,7 @@ pub fn frame_opportunity_with_commit_lead(
 mod tests {
     use super::{
         default_display_timing, display_timing, frame_opportunity, present_hints,
-        present_hints_with_commit_lead, scheduler_config, timebase,
+        present_hints_with_commit_lead, present_time_from_statistics, scheduler_config, timebase,
     };
     use frameclock::timing::PresentationTiming;
     use frameclock::{DisplayTiming, Duration, FrameTick, HostTime, OutputId};
@@ -211,6 +248,37 @@ mod tests {
         assert_eq!(
             display_timing(&tick, fallback),
             DisplayTiming::fixed(REFRESH)
+        );
+    }
+
+    #[test]
+    fn present_time_is_the_sample_when_the_counts_match() {
+        let sample = HostTime(5_000_000);
+        assert_eq!(
+            present_time_from_statistics(300, 300, sample, REFRESH),
+            sample
+        );
+    }
+
+    #[test]
+    fn present_time_moves_back_to_the_present_vblank() {
+        // Sampled two v-blanks after the image reached the screen.
+        assert_eq!(
+            present_time_from_statistics(300, 302, HostTime(5_000_000), REFRESH),
+            HostTime(5_000_000 - 2 * REFRESH.ticks())
+        );
+        // Sampled one v-blank before it.
+        assert_eq!(
+            present_time_from_statistics(301, 300, HostTime(5_000_000), REFRESH),
+            HostTime(5_000_000 + REFRESH.ticks())
+        );
+    }
+
+    #[test]
+    fn present_time_handles_wrapped_counts() {
+        assert_eq!(
+            present_time_from_statistics(u32::MAX, 1, HostTime(5_000_000), REFRESH),
+            HostTime(5_000_000 - 2 * REFRESH.ticks())
         );
     }
 
