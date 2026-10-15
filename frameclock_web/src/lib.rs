@@ -22,7 +22,9 @@ pub use raf::RafLoop;
 
 use frameclock::time::Timebase;
 use frameclock::timing::{PresentationTiming, default_commit_lead};
-use frameclock::{DisplayTiming, Duration, FrameOpportunity, FrameTick, HostTime, PresentHints};
+use frameclock::{
+    DisplayTiming, Duration, FrameOpportunity, FrameTick, HostTime, PresentHints, SchedulerConfig,
+};
 
 /// Browser host-time conversion: 1 tick = 1 microsecond = 1000 nanoseconds.
 pub const TIMEBASE: Timebase = Timebase::new(1000, 1);
@@ -55,6 +57,16 @@ pub fn now() -> HostTime {
 #[must_use]
 pub const fn timebase() -> Timebase {
     TIMEBASE
+}
+
+/// Returns the scheduler configuration for browser ticks.
+///
+/// This is [`SchedulerConfig::pacing_only`] in microsecond ticks: RAF gives
+/// no predicted present time, and every duration the scheduler works with
+/// is in [`TIMEBASE`].
+#[must_use]
+pub const fn scheduler_config() -> SchedulerConfig {
+    SchedulerConfig::pacing_only(TIMEBASE)
 }
 
 /// Computes pacing-only [`PresentHints`] from a browser [`FrameTick`] using
@@ -137,7 +149,7 @@ pub fn frame_opportunity_with_commit_lead(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frameclock::{FrameBeginResult, FrameDemand, FrameDriver, OutputId, SchedulerConfig};
+    use frameclock::{FrameBeginResult, FrameDemand, FrameDriver, OutputId};
 
     fn test_tick() -> FrameTick {
         FrameTick {
@@ -206,7 +218,7 @@ mod tests {
     #[test]
     fn driver_returns_ready_frames_during_the_callback() {
         for demand in [FrameDemand::INPUT, FrameDemand::ANIMATION] {
-            let mut driver = FrameDriver::new(SchedulerConfig::pacing_only(TIMEBASE));
+            let mut driver = FrameDriver::new(scheduler_config());
             driver.request(demand);
             let opportunity = frame_opportunity(test_tick(), DEFAULT_REFRESH_INTERVAL);
 
