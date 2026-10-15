@@ -54,6 +54,8 @@ env:
     --exclude frameclock_wayland
   # List of features that depend on the standard library and will be excluded from no_std checks.
   FEATURES_DEPENDING_ON_STD: "std,default"
+  # The iOS target that frameclock_apple is checked against on macOS runners.
+  RUST_IOS_TARGET: "aarch64-apple-ios"
 
 
 # Rationale
@@ -159,12 +161,9 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'merge_group' }}
 
-      - name: cargo clippy (no_std) (non-macOS)
-        if: runner.os != 'macOS'
-        run: cargo hack clippy ${{ env.RUST_STD_ONLY_PKGS }} --workspace --locked --optional-deps --each-feature --exclude-features ${{ env.FEATURES_DEPENDING_ON_STD }} --target x86_64-unknown-none -- -D warnings
-
-      - name: cargo clippy (no_std) (macOS)
-        if: runner.os == 'macOS'
+      # The no_std target is the same on every runner, so check it once.
+      - name: cargo clippy (no_std)
+        if: runner.os == 'Linux'
         run: cargo hack clippy ${{ env.RUST_STD_ONLY_PKGS }} --workspace --locked --optional-deps --each-feature --exclude-features ${{ env.FEATURES_DEPENDING_ON_STD }} --target x86_64-unknown-none -- -D warnings
 
       - name: cargo clippy (Linux)
@@ -190,6 +189,12 @@ jobs:
       - name: cargo clippy (auxiliary) (macOS)
         if: runner.os == 'macOS'
         run: cargo hack clippy ${{ env.RUST_LINUX_EXCLUDE_PKGS }} ${{ env.RUST_WIN_EXCLUDE_PKGS }} --workspace --locked --optional-deps --each-feature --ignore-unknown-features --features std --tests --benches --examples -- -D warnings
+
+      - name: cargo clippy (iOS)
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add ${{ env.RUST_IOS_TARGET }}
+          cargo hack clippy -p frameclock_apple --locked --optional-deps --each-feature --target ${{ env.RUST_IOS_TARGET }} -- -D warnings
 
   clippy-stable-wasm:
     name: cargo clippy (wasm32)
@@ -321,12 +326,9 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'merge_group' }}
 
-      - name: cargo check (no_std) (non-macOS)
-        if: runner.os != 'macOS'
-        run: cargo hack check ${{ env.RUST_MIN_VER_PKGS }} ${{ env.RUST_STD_ONLY_PKGS }} --locked --optional-deps --each-feature --exclude-features ${{ env.FEATURES_DEPENDING_ON_STD }} --target x86_64-unknown-none
-
-      - name: cargo check (no_std) (macOS)
-        if: runner.os == 'macOS'
+      # The no_std target is the same on every runner, so check it once.
+      - name: cargo check (no_std)
+        if: runner.os == 'Linux'
         run: cargo hack check ${{ env.RUST_MIN_VER_PKGS }} ${{ env.RUST_STD_ONLY_PKGS }} --locked --optional-deps --each-feature --exclude-features ${{ env.FEATURES_DEPENDING_ON_STD }} --target x86_64-unknown-none
 
       - name: cargo check (Linux)
@@ -340,6 +342,12 @@ jobs:
       - name: cargo check (macOS)
         if: runner.os == 'macOS'
         run: cargo hack check ${{ env.RUST_MIN_VER_PKGS }} ${{ env.RUST_LINUX_EXCLUDE_PKGS }} ${{ env.RUST_WIN_EXCLUDE_PKGS }} --locked --optional-deps --each-feature --ignore-unknown-features --features std
+
+      - name: cargo check (iOS)
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add ${{ env.RUST_IOS_TARGET }}
+          cargo hack check -p frameclock_apple --locked --optional-deps --each-feature --target ${{ env.RUST_IOS_TARGET }}
 
   check-msrv-wasm:
     name: cargo check (msrv) (wasm32)
