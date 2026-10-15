@@ -5,6 +5,7 @@
 
 use crate::queue::BoundedQueue;
 use crate::time::Clock;
+use frameclock::timing::next_refresh;
 use frameclock::{Duration, FrameTick, HostTime, OutputId};
 
 /// Internal bounded queue for frame ticks.
@@ -211,22 +212,15 @@ impl TickerState {
 /// Predicts the next vsync at or after `now` from the last observed present.
 ///
 /// Returns `None` when no presentation feedback has been observed yet or the
-/// refresh interval is unknown, leaving the tick pacing-only. Otherwise it
-/// advances the last observed actual-present time by whole refresh intervals
-/// until it reaches `now`, landing on the compositor's vsync grid.
+/// refresh interval is unknown, leaving the tick pacing-only. Otherwise it is
+/// the next refresh on the compositor's vsync grid, as found by
+/// [`next_refresh`].
 fn predict_next_present(
     last_actual: Option<HostTime>,
     refresh_interval: Option<Duration>,
     now: HostTime,
 ) -> Option<HostTime> {
-    let last = last_actual?;
-    let refresh = refresh_interval
-        .filter(|interval| !interval.is_zero())?
-        .ticks();
-    let elapsed = now.ticks().saturating_sub(last.ticks());
-    let intervals = elapsed.div_ceil(refresh);
-    let advance = intervals.checked_mul(refresh)?;
-    last.ticks().checked_add(advance).map(HostTime)
+    next_refresh(last_actual?, refresh_interval?, now)
 }
 
 impl Default for TickerState {
