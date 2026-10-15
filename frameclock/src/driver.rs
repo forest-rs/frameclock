@@ -945,6 +945,12 @@ mod tests {
         )
     }
 
+    fn tick_started_opportunity(now: u64) -> FrameOpportunity {
+        let mut opportunity = opportunity(now, 0);
+        opportunity.hints = opportunity.hints.starting_at_tick();
+        opportunity
+    }
+
     fn predictive_opportunity(
         now: u64,
         _frame_index: u64,
@@ -1760,5 +1766,49 @@ mod tests {
         });
 
         assert!(driver.scheduler().safety_margin_ticks() > 0);
+    }
+
+    #[test]
+    fn tick_started_frames_keep_the_cadence_across_callbacks() {
+        let mut driver = driver();
+        // Bit `i` is set when callback `i` started a frame.
+        let mut started = 0_u8;
+        for i in 0..8_u64 {
+            // Callbacks arrive with a little jitter.
+            let now = 1_000 + i * REFRESH_INTERVAL.ticks() + (i % 3);
+            driver.request(FrameDemand::BACKGROUND);
+            match driver.begin_frame(tick_started_opportunity(now)).result {
+                FrameBeginResult::Ready(frame) => {
+                    started |= 1 << i;
+                    let _ =
+                        driver.submit_frame(frame, FrameSubmission::new(HostTime(now + 5), None));
+                }
+                FrameBeginResult::WaitUntil(_) => {}
+                other => panic!("callback {i}: {other:?}"),
+            }
+        }
+
+        // Background work runs every other refresh.
+        assert_eq!(started, 0b1010_1010, "{started:08b}");
+    }
+
+    #[test]
+    fn input_preempts_a_frame_waiting_for_a_later_tick() {
+        let mut driver = driver();
+        driver.request(FrameDemand::BACKGROUND);
+        assert!(matches!(
+            driver.begin_frame(tick_started_opportunity(1_000)).result,
+            FrameBeginResult::WaitUntil(_)
+        ));
+
+        driver.request(FrameDemand::INPUT);
+        let FrameBeginResult::Ready(frame) = driver
+            .begin_frame(tick_started_opportunity(1_000 + REFRESH_INTERVAL.ticks()))
+            .result
+        else {
+            panic!("input must start at the next tick");
+        };
+        assert!(frame.plan().demand.contains(FrameDemand::INPUT));
+        assert_eq!(frame.plan().frame_start, HostTime(1_100));
     }
 }
