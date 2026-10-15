@@ -5,7 +5,7 @@
 
 use crate::queue::BoundedQueue;
 use crate::time::Clock;
-use frameclock::{FrameTick, HostTime, OutputId};
+use frameclock::{Duration, FrameTick, HostTime, OutputId};
 
 /// Internal bounded queue for frame ticks.
 ///
@@ -92,7 +92,7 @@ pub struct TickerState {
     queue: TickQueue,
     callback_in_flight: bool,
     last_observed_actual_present: Option<HostTime>,
-    last_observed_refresh_interval: Option<u64>,
+    last_observed_refresh_interval: Option<Duration>,
 }
 
 impl TickerState {
@@ -190,7 +190,7 @@ impl TickerState {
     ///
     /// Feed this only with presentation feedback for the same surface/output
     /// stream this ticker paces (see the [type-level contract](Self#one-stream-per-surface)).
-    pub fn set_last_observed_refresh_interval(&mut self, interval: u64) {
+    pub fn set_last_observed_refresh_interval(&mut self, interval: Duration) {
         self.last_observed_refresh_interval = Some(interval);
     }
 }
@@ -203,11 +203,13 @@ impl TickerState {
 /// until it reaches `now`, landing on the compositor's vsync grid.
 fn predict_next_present(
     last_actual: Option<HostTime>,
-    refresh_interval: Option<u64>,
+    refresh_interval: Option<Duration>,
     now: HostTime,
 ) -> Option<HostTime> {
     let last = last_actual?;
-    let refresh = refresh_interval.filter(|interval| *interval > 0)?;
+    let refresh = refresh_interval
+        .filter(|interval| !interval.is_zero())?
+        .ticks();
     let elapsed = now.ticks().saturating_sub(last.ticks());
     let intervals = elapsed.div_ceil(refresh);
     let advance = intervals.checked_mul(refresh)?;
@@ -225,8 +227,8 @@ mod tests {
     use super::{TickQueue, TickerState, predict_next_present};
     use crate::time::Clock;
     use frameclock::FrameTick;
-    use frameclock::HostTime;
     use frameclock::OutputId;
+    use frameclock::{Duration, HostTime};
 
     fn test_tick(now: u64) -> FrameTick {
         FrameTick {
@@ -404,26 +406,32 @@ mod tests {
     #[test]
     fn predict_next_present_rounds_up_to_next_vsync() {
         // last + 4*refresh = 1640 is the first vsync at or after now = 1500.
-        let predicted = predict_next_present(Some(HostTime(1000)), Some(160), HostTime(1500));
+        let predicted =
+            predict_next_present(Some(HostTime(1000)), Some(Duration(160)), HostTime(1500));
         assert_eq!(predicted, Some(HostTime(1640)));
     }
 
     #[test]
     fn predict_next_present_on_exact_vsync_returns_now() {
         // now = 1000 + 3*160 lands exactly on a vsync, so the prediction is now.
-        let predicted = predict_next_present(Some(HostTime(1000)), Some(160), HostTime(1480));
+        let predicted =
+            predict_next_present(Some(HostTime(1000)), Some(Duration(160)), HostTime(1480));
         assert_eq!(predicted, Some(HostTime(1480)));
     }
 
     #[test]
     fn predict_next_present_when_last_at_or_after_now_returns_last() {
-        let predicted = predict_next_present(Some(HostTime(2000)), Some(160), HostTime(1500));
+        let predicted =
+            predict_next_present(Some(HostTime(2000)), Some(Duration(160)), HostTime(1500));
         assert_eq!(predicted, Some(HostTime(2000)));
     }
 
     #[test]
     fn predict_next_present_without_actual_present_is_none() {
-        assert_eq!(predict_next_present(None, Some(160), HostTime(1500)), None);
+        assert_eq!(
+            predict_next_present(None, Some(Duration(160)), HostTime(1500)),
+            None
+        );
     }
 
     #[test]
@@ -433,7 +441,7 @@ mod tests {
             None
         );
         assert_eq!(
-            predict_next_present(Some(HostTime(1000)), Some(0), HostTime(1500)),
+            predict_next_present(Some(HostTime(1000)), Some(Duration(0)), HostTime(1500)),
             None
         );
     }
@@ -442,13 +450,13 @@ mod tests {
     fn on_callback_done_emits_predicted_present_from_feedback() {
         let mut ticker = TickerState::new();
         ticker.set_last_observed_actual_present(HostTime(1000));
-        ticker.set_last_observed_refresh_interval(16_666_667);
+        ticker.set_last_observed_refresh_interval(Duration(16_666_667));
 
         assert!(ticker.mark_callback_requested());
         ticker.on_callback_done(Clock::Monotonic, OutputId(0));
         let tick = ticker.poll_tick().expect("should have a tick");
 
-        assert_eq!(tick.refresh_interval, Some(16_666_667));
+        assert_eq!(tick.refresh_interval, Some(Duration(16_666_667)));
         assert_eq!(tick.prev_actual_present, Some(HostTime(1000)));
         let predicted = tick.predicted_present.expect("prediction available");
         // The prediction is the first vsync at or after the tick time.

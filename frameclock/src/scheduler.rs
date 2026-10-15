@@ -440,8 +440,7 @@ impl Scheduler {
         opportunity
             .tick
             .refresh_interval
-            .filter(|ticks| *ticks > 0)
-            .map(Duration)
+            .filter(|interval| !interval.is_zero())
             .unwrap_or_else(|| {
                 let display_min = opportunity.display_timing.min_interval();
                 if display_min.is_zero() {
@@ -653,7 +652,7 @@ mod tests {
         FrameTick {
             now: HostTime(now),
             predicted_present: predicted.map(HostTime),
-            refresh_interval: Some(REFRESH_INTERVAL.ticks()),
+            refresh_interval: Some(REFRESH_INTERVAL),
             output: OutputId(0),
             prev_actual_present: None,
         }
@@ -1028,7 +1027,7 @@ mod tests {
         let tick = FrameTick {
             now: HostTime(1_000_000),
             predicted_present: Some(HostTime(9_333_333)),
-            refresh_interval: Some(8_333_333),
+            refresh_interval: Some(Duration(8_333_333)),
             output: OutputId(0),
             prev_actual_present: None,
         };
@@ -1070,7 +1069,7 @@ mod tests {
         let tick = FrameTick {
             now: HostTime(1_000_000),
             predicted_present: Some(HostTime(9_333_333)),
-            refresh_interval: Some(8_333_333),
+            refresh_interval: Some(Duration(8_333_333)),
             output: OutputId(0),
             prev_actual_present: None,
         };

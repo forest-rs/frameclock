@@ -63,10 +63,7 @@ pub const fn timebase() -> Timebase {
 /// `latest_commit` is one refresh interval after the tick's `now`.
 #[must_use]
 pub fn present_hints(tick: &FrameTick, fallback_refresh_interval: Duration) -> PresentHints {
-    let refresh_interval = match tick.refresh_interval {
-        Some(ticks) => Duration(ticks),
-        None => fallback_refresh_interval,
-    };
+    let refresh_interval = tick.refresh_interval.unwrap_or(fallback_refresh_interval);
     PresentHints::pacing_only(
         tick.now
             .checked_add(refresh_interval)

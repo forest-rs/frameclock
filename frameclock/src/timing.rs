@@ -114,8 +114,7 @@ impl DisplayTiming {
     pub fn from_tick(tick: &FrameTick, fallback_interval: Duration) -> Self {
         let interval = tick
             .refresh_interval
-            .filter(|ticks| *ticks > 0)
-            .map(Duration)
+            .filter(|interval| !interval.is_zero())
             .or_else(|| {
                 tick.predicted_present
                     .map(|present| present.saturating_duration_since(tick.now))
@@ -246,8 +245,8 @@ pub struct FrameTick {
     pub now: HostTime,
     /// Predicted time when pixels will be presented, if known.
     pub predicted_present: Option<HostTime>,
-    /// Display refresh interval in host-time ticks, if known.
-    pub refresh_interval: Option<u64>,
+    /// Display refresh interval, if known.
+    pub refresh_interval: Option<Duration>,
     /// Which output this tick is for.
     pub output: OutputId,
     /// Actual present time of the *previous* frame, if the backend can report
@@ -308,7 +307,7 @@ impl FrameOpportunity {
         let tick = FrameTick {
             now,
             predicted_present: None,
-            refresh_interval: Some(refresh_interval.ticks()),
+            refresh_interval: Some(refresh_interval),
             output,
             prev_actual_present: None,
         };
@@ -744,7 +743,7 @@ mod tests {
         FrameTick {
             now: HostTime(now),
             predicted_present: predicted.map(HostTime),
-            refresh_interval,
+            refresh_interval: refresh_interval.map(Duration),
             output: OutputId(0),
             prev_actual_present: None,
         }

@@ -86,7 +86,7 @@ fn main() {
             let tick = FrameTick {
                 now,
                 predicted_present: Some(predicted_present),
-                refresh_interval: Some(REFRESH_INTERVAL.ticks()),
+                refresh_interval: Some(REFRESH_INTERVAL),
                 output,
                 prev_actual_present: if frame_index > 0 { Some(now) } else { None },
             };

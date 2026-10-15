@@ -4,7 +4,7 @@
 //! Presentation feedback contracts and queueing.
 
 use crate::queue::BoundedQueue;
-use frameclock::{HostTime, OutputId};
+use frameclock::{Duration, HostTime, OutputId};
 
 /// Unique identity for one `wl_surface.commit` submission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -32,8 +32,8 @@ pub enum PresentEvent {
         id: SubmissionId,
         /// Actual presentation timestamp in host-time ticks.
         actual_present: HostTime,
-        /// Observed refresh interval in host ticks, if known.
-        refresh_interval: Option<u64>,
+        /// Observed refresh interval, if known.
+        refresh_interval: Option<Duration>,
         /// Output where the frame was shown, if known.
         output: Option<OutputId>,
         /// Raw protocol flags.
@@ -108,8 +108,8 @@ impl Default for PresentEventQueue {
 #[cfg(test)]
 mod tests {
     use super::{PresentEvent, PresentEventQueue, SubmissionId, presentation_time_to_host_time};
-    use frameclock::HostTime;
     use frameclock::OutputId;
+    use frameclock::{Duration, HostTime};
 
     #[test]
     fn queue_overflow_drops_oldest_event() {
@@ -145,7 +145,7 @@ mod tests {
         let event = PresentEvent::Presented {
             id: SubmissionId(9),
             actual_present: HostTime(123),
-            refresh_interval: Some(16_666_667),
+            refresh_interval: Some(Duration(16_666_667)),
             output: Some(OutputId(4)),
             flags: 7,
         };

@@ -10,7 +10,7 @@ use core::pin::Pin;
 use core::ptr::NonNull;
 
 use frameclock::time::Timebase;
-use frameclock::{FrameTick, HostTime, OutputId};
+use frameclock::{Duration, FrameTick, HostTime, OutputId};
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::{CVDisplayLink as CVDisplayLinkRaw, CVTimeStamp, kCVReturnSuccess};
 
@@ -207,7 +207,7 @@ unsafe extern "C-unwind" fn display_link_callback(
     let now = HostTime(now_ts.hostTime);
     let predicted_present = HostTime(out_ts.hostTime);
     let refresh_interval = if out_ts.hostTime > now_ts.hostTime {
-        Some(out_ts.hostTime - now_ts.hostTime)
+        Some(Duration(out_ts.hostTime - now_ts.hostTime))
     } else {
         None
     };
