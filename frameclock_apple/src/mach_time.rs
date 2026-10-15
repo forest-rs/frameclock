@@ -19,8 +19,9 @@ unsafe extern "C" {
 
 pub(crate) fn timebase() -> Timebase {
     let mut info = MachTimebaseInfo { numer: 0, denom: 0 };
-    unsafe { mach_timebase_info(&mut info) };
-    Timebase::new(info.numer, info.denom)
+    let status = unsafe { mach_timebase_info(&mut info) };
+    assert_eq!(status, 0, "mach_timebase_info failed with status {status}");
+    Timebase::try_new(info.numer, info.denom).expect("mach_timebase_info reported a zero term")
 }
 
 pub(crate) fn now() -> HostTime {
