@@ -510,8 +510,26 @@ impl PresentHints {
         self
     }
 
-    /// Returns whether frame work must start at the tick that offered these
-    /// hints. See [`starting_at_tick`](Self::starting_at_tick).
+    /// Returns these hints with frame work starting when the scheduler
+    /// plans it, which may fall between ticks.
+    ///
+    /// This is the default for [`PresentHints::new`]. A host that wakes
+    /// itself at the time [`WaitUntil`](crate::FrameBeginResult::WaitUntil)
+    /// returns, and then calls
+    /// [`FrameDriver::begin_pending_frame`](crate::FrameDriver::begin_pending_frame),
+    /// can use it on hints a platform adapter marked
+    /// [`starting_at_tick`](Self::starting_at_tick): frames then start as late
+    /// as the commit deadline and its margins allow, so the input and state
+    /// they sample are fresher.
+    #[inline]
+    #[must_use]
+    pub const fn starting_when_planned(mut self) -> Self {
+        self.starts_at_tick = false;
+        self
+    }
+
+    /// Returns whether frame work must start at a tick. See
+    /// [`starting_at_tick`](Self::starting_at_tick).
     #[inline]
     #[must_use]
     pub const fn starts_at_tick(self) -> bool {
