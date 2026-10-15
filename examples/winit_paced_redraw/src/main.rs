@@ -20,7 +20,6 @@
 
 use std::time::Duration as StdDuration;
 
-use frameclock::timing::FramePlan;
 use frameclock::{
     Duration, FrameBeginResult, FrameDemand, FrameDriver, FrameOpportunity, FrameSubmission,
     HostTime, OutputId, SchedulerConfig,
@@ -246,7 +245,7 @@ impl WindowState {
         // commands, and submit before `plan.commit_deadline`. If the backend
         // provides a real `plan.target_present`, presentation-aware renderers can
         // use it to pick content or configure platform-specific present timing.
-        let submission = self.renderer.render(&plan, work_mode, now);
+        let submission = self.renderer.render(work_mode, now);
 
         // Submitting through the driver feeds scheduler feedback internally and
         // returns the frameclock-owned timing summary a devtools view would use.
@@ -347,18 +346,18 @@ impl DemoModel {
 }
 
 impl SyntheticRenderer {
-    fn render(&mut self, plan: &FramePlan, work_mode: WorkMode, now: HostTime) -> FrameSubmission {
+    fn render(&mut self, work_mode: WorkMode, now: HostTime) -> FrameSubmission {
         // This example has no renderer, so it invents a short submit span.
         // The driver recorded frame build start when it returned ActiveFrame;
         // a real backend would provide the queue submit time and attach
-        // platform present feedback when available.
-        let budget = plan.commit_deadline.saturating_duration_since(now);
-        let requested_cost = match work_mode {
+        // platform present feedback when available. The span is not clamped
+        // to the commit deadline: a late wake that leaves less time than the
+        // work needs should reach the scheduler as a pacing overrun.
+        let build_cost = match work_mode {
             WorkMode::LatencySensitive => Duration(SYNTHETIC_BUILD_COST.ticks() / 2),
             WorkMode::Normal => SYNTHETIC_BUILD_COST,
             WorkMode::Background => Duration(SYNTHETIC_BUILD_COST.ticks().saturating_mul(2)),
         };
-        let build_cost = Duration(requested_cost.ticks().min(budget.ticks()));
 
         FrameSubmission::new(now + build_cost, None)
     }
