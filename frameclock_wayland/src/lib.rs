@@ -73,7 +73,20 @@ pub use tick::TickerState;
 pub use time::{Clock, now, timebase};
 
 use frameclock::timing::{PresentationTiming, default_commit_lead};
-use frameclock::{DisplayTiming, Duration, FrameOpportunity, FrameTick, PresentHints};
+use frameclock::{
+    DisplayTiming, Duration, FrameOpportunity, FrameTick, PresentHints, SchedulerConfig,
+};
+
+/// Returns the scheduler configuration for Wayland ticks.
+///
+/// This is [`SchedulerConfig::estimated`] in this crate's nanosecond
+/// [`timebase`]: once presentation feedback establishes a cadence,
+/// [`frame_opportunity`] builds estimated hints from a client-side
+/// extrapolation of the refresh grid.
+#[must_use]
+pub const fn scheduler_config() -> SchedulerConfig {
+    SchedulerConfig::estimated(timebase())
+}
 
 /// Computes [`PresentHints`] from a Wayland [`FrameTick`] using
 /// [`default_commit_lead`].

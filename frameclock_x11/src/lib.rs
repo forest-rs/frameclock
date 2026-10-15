@@ -89,7 +89,20 @@ pub use tick::PresentTicker;
 pub use time::{Clock, now, timebase, ust_to_host_time};
 
 use frameclock::timing::{PresentationTiming, default_commit_lead};
-use frameclock::{DisplayTiming, Duration, FrameOpportunity, FrameTick, PresentHints};
+use frameclock::{
+    DisplayTiming, Duration, FrameOpportunity, FrameTick, PresentHints, SchedulerConfig,
+};
+
+/// Returns the scheduler configuration for X11 Present ticks.
+///
+/// This is [`SchedulerConfig::estimated`] in this crate's nanosecond
+/// [`timebase`]: once two completions establish a cadence,
+/// [`frame_opportunity`] builds estimated hints from a client-side
+/// extrapolation of the refresh grid.
+#[must_use]
+pub const fn scheduler_config() -> SchedulerConfig {
+    SchedulerConfig::estimated(timebase())
+}
 
 /// Computes [`PresentHints`] from an X11 [`FrameTick`] using
 /// [`default_commit_lead`].
