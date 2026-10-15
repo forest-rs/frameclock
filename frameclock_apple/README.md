@@ -165,9 +165,11 @@ table summarizes the choice.
 Display timing belongs to the output that produced the tick. Hosts should
 refresh output identity and target-output `DisplayTiming` when a window moves
 between displays or the platform reports a different display mode. For
-ProMotion/VRR displays, pass `DisplayTiming::variable` for the current output
-and use `preferred_frame_rate_range_for_frame`,
-`preferred_frame_rate_range`, or
+ProMotion/VRR displays, pass `DisplayTiming::variable` for the current output.
+On macOS, `NSScreen`'s `minimumRefreshInterval`, `maximumRefreshInterval` and
+`displayUpdateGranularity` give the range and, when it is non-zero, its step,
+in seconds; convert them to Mach ticks with `Duration::from_nanos`. Then use
+`preferred_frame_rate_range_for_frame`, `preferred_frame_rate_range`, or
 `CaDisplayLink::set_preferred_frame_interval` to translate a planned
 `FramePlan::frame_interval` into a Core Animation frame-rate range.
 
