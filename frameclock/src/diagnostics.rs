@@ -87,6 +87,10 @@ pub struct FramePlanEvent {
     pub commit_deadline: HostTime,
     /// Current scheduler pipeline depth.
     pub pipeline_depth: u8,
+    /// Presentation latency the plan compensated for.
+    ///
+    /// See [`FramePlan::present_latency`].
+    pub present_latency: Duration,
     /// Current scheduler safety margin in host-time ticks.
     pub safety_margin_ticks: u64,
 }
@@ -106,6 +110,7 @@ impl FramePlanEvent {
             presentation_timing: plan.presentation_timing,
             commit_deadline: plan.commit_deadline,
             pipeline_depth: plan.pipeline_depth,
+            present_latency: plan.present_latency,
             safety_margin_ticks,
         }
     }
@@ -290,6 +295,15 @@ pub struct FrameTimingSummary {
     pub drop_reason: Option<FrameDropReason>,
     /// Scheduler pipeline depth used for the plan.
     pub pipeline_depth: u8,
+    /// Presentation latency the plan compensated for.
+    ///
+    /// [`target_present`](Self::target_present) and
+    /// [`sample_time`](Self::sample_time) include this shift. It is the
+    /// estimate the frame was planned with; [`scheduler_state`] holds the
+    /// estimate after this frame's feedback.
+    ///
+    /// [`scheduler_state`]: Self::scheduler_state
+    pub present_latency: Duration,
     /// Scheduler safety margin used for the plan, in host-time ticks.
     pub safety_margin_ticks: u64,
     /// Scheduler adaptation state sampled for this frame, if recorded.
@@ -435,6 +449,7 @@ impl FrameTimingSummaryBuilder {
             pacing_overrun: feedback.and_then(|feedback| feedback.pacing_overrun),
             drop_reason: drop.map(|drop| drop.reason),
             pipeline_depth: plan.pipeline_depth,
+            present_latency: plan.present_latency,
             safety_margin_ticks: plan.safety_margin_ticks,
             scheduler_state,
         })
@@ -651,6 +666,7 @@ mod tests {
             presentation_timing: PresentationTiming::Predictive,
             commit_deadline: HostTime(1_900),
             pipeline_depth: 1,
+            present_latency: Duration::ZERO,
             safety_margin_ticks: 500,
         }
     }

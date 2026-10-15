@@ -226,8 +226,8 @@ impl Recorder {
     ///
     /// The deadline point carries the scheduler state the frame was planned
     /// with, so it stays with that frame however late the summary arrives:
-    /// `pipeline_depth`, `safety_margin_ns`, `frame_interval_ns`, and, when
-    /// the scheduler sampled its state, `present_latency_ns`.
+    /// `pipeline_depth`, `safety_margin_ns`, `frame_interval_ns`, and
+    /// `present_latency_ns`.
     ///
     /// Every drop is recorded with its reason, including frames the host
     /// discarded or superseded itself; Footfall's analysis counts only some
@@ -248,19 +248,17 @@ impl Recorder {
                 ),
             ));
         }
-        let mut plan = Args::none()
+        let plan = Args::none()
             .with("pipeline_depth", summary.pipeline_depth)
             .with("safety_margin_ns", self.nanos(summary.safety_margin_ticks))
             .with(
                 "frame_interval_ns",
                 self.nanos(summary.frame_interval.ticks()),
-            );
-        if let Some(state) = summary.scheduler_state {
-            plan = plan.with(
+            )
+            .with(
                 "present_latency_ns",
-                self.nanos(state.present_latency_ticks),
+                self.nanos(summary.present_latency.ticks()),
             );
-        }
         footfall_core::frame_point(
             &self
                 .at(number, FramePointKind::Deadline, summary.commit_deadline)
