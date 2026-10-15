@@ -41,22 +41,14 @@ acquire native presentation resources, and how to submit to Core Animation or
 Metal.
 
 ```rust,ignore
-use frameclock::{
-    DisplayTiming, Duration, FrameBeginResult, FrameDemand, FrameDriver,
-    OutputId, SchedulerConfig,
-};
+use frameclock::{FrameBeginResult, FrameDemand, FrameDriver, OutputId};
 use frameclock_apple::CaDisplayLink;
 use objc2::MainThreadMarker;
 
 // The display-link callback runs on the main thread and may own the driver.
-let mut driver = FrameDriver::new(SchedulerConfig::predictive(
-    frameclock_apple::timebase(),
-));
-// Host times are Mach ticks, so convert nanosecond intervals first.
-let display_timing = DisplayTiming::fixed(Duration::from_nanos(
-    16_666_667,
-    frameclock_apple::timebase(),
-));
+let mut driver = FrameDriver::new(frameclock_apple::scheduler_config());
+// 60 Hz in Mach ticks, refined from each tick's refresh interval.
+let display_timing = frameclock_apple::default_display_timing();
 let output = OutputId(0);
 let mtm = MainThreadMarker::new().unwrap();
 
@@ -105,6 +97,8 @@ The root module exposes the Apple integration surface:
 
 - `CaDisplayLink` and `CvDisplayLink` for the enabled display-link sources.
 - `now` and `timebase` for Mach host-time conversion.
+- `scheduler_config` and `default_display_timing` for the `SchedulerConfig`
+  and fallback `DisplayTiming` that match these ticks.
 - `present_hints`, `display_timing`, and `frame_opportunity` for hosts that own
   `FrameDriver` directly.
 - `AppleFeedbackMode`, and each display link's `FEEDBACK_MODE`, for turning
@@ -136,7 +130,8 @@ tick overtaken by a newer one while it waits is dropped.
 Every `Duration` and `DisplayTiming` passed alongside these ticks is in Mach
 ticks too. Convert nanosecond values with `Duration::from_nanos(nanos,
 frameclock_apple::timebase())`; on Apple silicon one Mach tick is about 41.7
-ns, so a raw `Duration(16_666_667)` would mean about 694 ms.
+ns, so a raw `Duration(16_666_667)` would mean about 694 ms. Debug builds of
+the scheduler panic on display timing that slow.
 
 `frame_opportunity` computes predictive `PresentHints` from the display-link
 prediction when it is fresh. The adapter subtracts a small platform commit lead
@@ -158,6 +153,14 @@ actual display time; the next `FrameDriver::begin_frame` returns the completed
 `prev_actual_present`. With `CVDisplayLink`, the submission completes at commit
 time because this adapter does not synthesize actual-present timestamps from
 `CVDisplayLink` ticks.
+
+That `CADisplayLink` feedback is right for Core Animation transactions, which
+reach the screen at the next refresh. A Metal renderer's frame is shown after
+its GPU work, often several refreshes later: submit it with
+`FrameSubmission::reported` instead, and report each drawable's
+`presentedTime`, converted with `media_time_to_host_time`, through
+`FrameDriver::report_frame`. The `frameclock` README's "Submitting Frames"
+table summarizes the choice.
 
 Display timing belongs to the output that produced the tick. Hosts should
 refresh output identity and target-output `DisplayTiming` when a window moves

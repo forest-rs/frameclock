@@ -45,7 +45,7 @@ use frameclock::time::Timebase;
 use frameclock::timing::{PresentationTiming, default_commit_lead};
 use frameclock::{
     ActiveFrame, DisplayTiming, Duration, FrameOpportunity, FrameSubmission, FrameTick, HostTime,
-    PresentHints,
+    PresentHints, SchedulerConfig,
 };
 
 /// Returns the current host time using Mach absolute time.
@@ -58,6 +58,26 @@ pub fn now() -> HostTime {
 #[must_use]
 pub fn timebase() -> Timebase {
     mach_time::timebase()
+}
+
+/// Returns the scheduler configuration for Apple display-link ticks.
+///
+/// This is [`SchedulerConfig::predictive`] in Mach ticks: display links
+/// report strong predicted present times, and every duration the scheduler
+/// works with is in this crate's [`timebase`].
+#[must_use]
+pub fn scheduler_config() -> SchedulerConfig {
+    SchedulerConfig::predictive(timebase())
+}
+
+/// Returns fixed 60 Hz display timing in Mach ticks.
+///
+/// Pass it to [`frame_opportunity`] when nothing better is known about the
+/// output: fixed timing is refined from each tick's refresh interval. For a
+/// `ProMotion` output, pass [`DisplayTiming::variable`] with its range instead.
+#[must_use]
+pub fn default_display_timing() -> DisplayTiming {
+    DisplayTiming::fixed(Duration::from_nanos(16_666_667, timebase()))
 }
 
 /// Computes [`PresentHints`] from an Apple display-link tick using
@@ -271,6 +291,13 @@ fn fps_for_interval(interval: Duration, timebase: Timebase) -> Option<f32> {
 mod tests {
     use super::*;
     use frameclock::OutputId;
+
+    #[test]
+    fn default_display_timing_is_60_hz() {
+        let interval = default_display_timing().min_interval();
+        let nanos = timebase().ticks_to_nanos(interval.ticks());
+        assert!(nanos.abs_diff(16_666_667) < 1_000, "{nanos} ns");
+    }
 
     fn tick(predicted_present: Option<HostTime>) -> FrameTick {
         FrameTick {
