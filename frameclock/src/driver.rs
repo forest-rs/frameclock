@@ -154,13 +154,16 @@ pub enum PresentationObservation {
     /// The platform reports actual presentation on a later frame tick.
     ///
     /// The driver stores the submission and returns the summary in
-    /// [`FrameBegin::resolved_feedback`] the next time
-    /// [`FrameDriver::begin_frame`] is called.
+    /// [`FrameBegin::resolved_feedback`] from the first later
+    /// [`FrameDriver::begin_frame`] call whose tick reports a present time.
     ///
     /// The tick's timestamp is the display's latest refresh, so this suits
     /// hosts whose submission reaches the screen on the next one (a layer
     /// tree committed to a compositor). A renderer with GPU work queued
     /// behind the submission should use [`Self::Reported`].
+    ///
+    /// A timestamp earlier than the frame's submission cannot be when it was
+    /// shown, so the driver keeps waiting for a later tick's timestamp.
     Deferred,
     /// The host reports what became of this frame later, by frame index,
     /// with [`FrameDriver::report_frame`].
@@ -224,8 +227,10 @@ impl FrameSubmission {
     /// Creates submission facts for platforms that report actual present on a
     /// later frame tick.
     ///
-    /// The summary for this frame is returned by the next
-    /// [`FrameDriver::begin_frame`] call in [`FrameBegin::resolved_feedback`].
+    /// The summary for this frame is returned in
+    /// [`FrameBegin::resolved_feedback`] by the first later
+    /// [`FrameDriver::begin_frame`] call whose tick reports a present time at
+    /// or after the submission.
     #[inline]
     #[must_use]
     pub const fn deferred(submitted_at: HostTime) -> Self {
@@ -341,8 +346,8 @@ pub enum FrameBeginResult {
 ///
 /// [`Self::result`] is the lifecycle action for the current frame opportunity.
 /// [`Self::resolved_feedback`] carries the timing summary for a previous
-/// deferred submission when the current tick supplied
-/// [`FrameTick::prev_actual_present`].
+/// deferred submission when the current tick supplied a
+/// [`FrameTick::prev_actual_present`] at or after that submission.
 #[derive(Debug)]
 pub struct FrameBegin {
     /// Summary resolved from a previous [`FrameSubmission::deferred`] call.
@@ -587,8 +592,9 @@ impl FrameDriver {
     /// [`FrameSubmitResult::summary`].
     ///
     /// For [`PresentationObservation::Deferred`], this stores the submission
-    /// until the next [`begin_frame`](Self::begin_frame) call, then resolves it
-    /// with that tick's [`FrameTick::prev_actual_present`]. This keeps Apple-
+    /// until a later [`begin_frame`](Self::begin_frame) call whose tick carries
+    /// a [`FrameTick::prev_actual_present`] at or after the submission, then
+    /// resolves it with that timestamp. This keeps Apple-
     /// style previous-frame present feedback inside `frameclock` while keeping
     /// one public submit method.
     ///
@@ -715,7 +721,11 @@ impl FrameDriver {
         actual_present: Option<HostTime>,
     ) -> Option<FrameTimingSummary> {
         let actual_present = actual_present?;
-        let pending = self.pending_feedback.take()?;
+        // A refresh that happened before the frame was submitted cannot have
+        // shown it. Keep waiting rather than call a late frame on time.
+        let pending = self
+            .pending_feedback
+            .take_if(|pending| actual_present >= pending.submitted_at)?;
         let feedback = PresentFeedback::new(
             &pending.planned.plan,
             pending.build_start,
@@ -1571,6 +1581,47 @@ mod tests {
         assert_eq!(summary.actual_present, Some(HostTime(99)));
         assert_eq!(summary.missed_deadline, Some(false));
         assert!(driver.scheduler().safety_margin_ticks() > 0);
+    }
+
+    #[test]
+    fn deferred_submission_ignores_a_present_before_it_was_submitted() {
+        let mut driver = driver();
+        driver.request(FrameDemand::INPUT);
+        let FrameBeginResult::Ready(frame) = driver
+            .begin_frame(predictive_opportunity(10, 3, 100, 90))
+            .result
+        else {
+            panic!("input should start immediately");
+        };
+
+        // The build overran: the frame was submitted after the refresh it
+        // was planned for.
+        let submit = driver.submit_frame(frame, FrameSubmission::deferred(HostTime(120)));
+        assert!(submit.awaiting_actual_present);
+
+        // The next tick reports that refresh, which came before submission.
+        let begin = driver.begin_frame(predictive_opportunity_with_prev_actual(
+            130,
+            4,
+            200,
+            190,
+            Some(HostTime(100)),
+        ));
+        assert_eq!(begin.resolved_feedback, None);
+
+        // The tick after reports the refresh that really showed it.
+        let begin = driver.begin_frame(predictive_opportunity_with_prev_actual(
+            210,
+            5,
+            300,
+            290,
+            Some(HostTime(200)),
+        ));
+        let summary = begin
+            .resolved_feedback
+            .expect("a present after submission resolves the frame");
+        assert_eq!(summary.actual_present, Some(HostTime(200)));
+        assert_eq!(summary.missed_deadline, Some(true));
     }
 
     #[test]
