@@ -72,41 +72,20 @@ pub use presentation::{
 pub use tick::TickerState;
 pub use time::{Clock, now, timebase};
 
-use frameclock::{DisplayTiming, Duration, FrameOpportunity, FrameTick, HostTime, PresentHints};
+use frameclock::timing::{PresentationTiming, default_commit_lead};
+use frameclock::{DisplayTiming, Duration, FrameOpportunity, FrameTick, PresentHints};
 
-/// Returns the default commit lead for a refresh interval.
-///
-/// A predicted present time describes a vsync slot, not a promise that app work
-/// can be committed at the last possible tick. Use a small platform-side lead so
-/// [`PresentHints::latest_commit`] remains a commit boundary, while `frameclock`
-/// still owns learned app build margins.
-#[must_use]
-pub const fn default_commit_lead(refresh_interval: Duration) -> Duration {
-    refresh_interval.div_u64(4)
-}
-
-fn refresh_interval_for_tick(tick: &FrameTick, fallback_refresh_interval: Duration) -> Duration {
-    tick.refresh_interval
-        .filter(|interval| !interval.is_zero())
-        .unwrap_or(fallback_refresh_interval)
-}
-
-fn commit_boundary(target: HostTime, lead: Duration, floor: HostTime) -> HostTime {
-    target.checked_sub(lead).unwrap_or(floor).max(floor)
-}
-
-/// Computes [`PresentHints`] from a Wayland [`FrameTick`] using the default
-/// commit lead.
+/// Computes [`PresentHints`] from a Wayland [`FrameTick`] using
+/// [`default_commit_lead`].
 ///
 /// Use [`present_hints_with_commit_lead`] when a host has a platform-specific
 /// commit lead estimate.
 #[must_use]
 pub fn present_hints(tick: &FrameTick, fallback_refresh_interval: Duration) -> PresentHints {
-    let refresh_interval = refresh_interval_for_tick(tick, fallback_refresh_interval);
     present_hints_with_commit_lead(
         tick,
         fallback_refresh_interval,
-        default_commit_lead(refresh_interval),
+        default_commit_lead(tick.refresh_interval_or(fallback_refresh_interval)),
     )
 }
 
@@ -116,30 +95,21 @@ pub fn present_hints(tick: &FrameTick, fallback_refresh_interval: Duration) -> P
 /// [`TickerState`]) is a client-side extrapolation of the vsync grid, so it is
 /// reported as estimated timing (`PresentationTiming::Estimated`) rather than
 /// predictive. If the prediction is missing or stale, the hint falls back to
-/// pacing-only timing with a one-refresh commit boundary. The scheduler applies
-/// its own learned build margin later.
+/// pacing-only timing aimed one refresh after the tick, as described by
+/// [`PresentHints::for_tick`]. The scheduler applies its own learned build
+/// margin later.
 #[must_use]
 pub fn present_hints_with_commit_lead(
     tick: &FrameTick,
     fallback_refresh_interval: Duration,
     commit_lead: Duration,
 ) -> PresentHints {
-    let refresh_interval = refresh_interval_for_tick(tick, fallback_refresh_interval);
-    if let Some(predicted_present) = tick
-        .predicted_present
-        .filter(|predicted_present| *predicted_present >= tick.now)
-    {
-        return PresentHints::estimated(
-            predicted_present,
-            commit_boundary(predicted_present, commit_lead, tick.now),
-        );
-    }
-
-    let pacing_target = tick
-        .now
-        .checked_add(refresh_interval)
-        .unwrap_or(HostTime(u64::MAX));
-    PresentHints::pacing_only(commit_boundary(pacing_target, commit_lead, tick.now))
+    PresentHints::for_tick(
+        tick,
+        PresentationTiming::Estimated,
+        fallback_refresh_interval,
+        commit_lead,
+    )
 }
 
 /// Returns display timing for a Wayland [`FrameTick`].
@@ -160,7 +130,7 @@ pub fn display_timing(tick: &FrameTick, fallback_interval: Duration) -> DisplayT
 /// presentation feedback has established a cadence.
 #[must_use]
 pub fn frame_opportunity(tick: FrameTick, fallback_interval: Duration) -> FrameOpportunity {
-    let refresh_interval = refresh_interval_for_tick(&tick, fallback_interval);
+    let refresh_interval = tick.refresh_interval_or(fallback_interval);
     frame_opportunity_with_commit_lead(
         tick,
         fallback_interval,
@@ -182,10 +152,7 @@ pub fn frame_opportunity_with_commit_lead(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        default_commit_lead, display_timing, frame_opportunity, present_hints,
-        present_hints_with_commit_lead,
-    };
+    use super::{display_timing, frame_opportunity, present_hints, present_hints_with_commit_lead};
     use frameclock::OutputId;
     use frameclock::timing::PresentationTiming;
     use frameclock::{DisplayTiming, Duration, FrameTick, HostTime};
@@ -245,14 +212,6 @@ mod tests {
         assert_eq!(hints.presentation_timing(), PresentationTiming::PacingOnly);
         assert_eq!(hints.desired_present(), None);
         assert_eq!(hints.latest_commit(), HostTime(14_500_001));
-    }
-
-    #[test]
-    fn default_commit_lead_is_quarter_refresh() {
-        assert_eq!(
-            default_commit_lead(Duration(16_666_667)),
-            Duration(4_166_666)
-        );
     }
 
     #[test]
