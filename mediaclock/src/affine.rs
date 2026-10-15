@@ -21,7 +21,7 @@
 //! planned frame's sample or target-present time to choose content for the frame
 //! being prepared.
 
-use frameclock::HostTime;
+use frameclock::{Duration, HostTime};
 
 /// Result returned by [`AffineClock::update_or_reanchor`].
 ///
@@ -71,10 +71,15 @@ pub struct AffineClock {
     last_host: u64,
     /// Last media time observation.
     last_media: f64,
-    /// Whether the next observation may estimate a rate from the span since
-    /// the last observation. A commanded rate change between observations
-    /// clears this, because that span runs partly at each rate.
-    rate_baseline: bool,
+    /// The observation the next rate estimate is measured from, if any.
+    ///
+    /// It is the last observation unless that one came too soon after the
+    /// baseline to estimate a rate from. A commanded rate change between
+    /// observations clears it, because the span across the change runs
+    /// partly at each rate.
+    rate_baseline: Option<(u64, f64)>,
+    /// Shortest host span a rate is estimated over.
+    min_rate_span: u64,
 }
 
 impl AffineClock {
@@ -106,8 +111,24 @@ impl AffineClock {
             initialized: false,
             last_host: 0,
             last_media: 0.0,
-            rate_baseline: false,
+            rate_baseline: None,
+            min_rate_span: 0,
         }
+    }
+
+    /// Sets the shortest host span, in host ticks, that a rate is estimated
+    /// over.
+    ///
+    /// Observations closer together than this still correct the offset, but
+    /// the rate is estimated from the span between an earlier observation
+    /// and the first one at least `span` after it. Two observations a few
+    /// microseconds apart otherwise turn any timestamp jitter into a large
+    /// instantaneous rate. The default is zero: every observation estimates
+    /// a rate.
+    #[must_use]
+    pub const fn with_min_rate_span(mut self, span: Duration) -> Self {
+        self.min_rate_span = span.ticks();
+        self
     }
 
     /// Queries the estimated media time at a host time.
@@ -195,14 +216,21 @@ impl AffineClock {
         let predicted_media = self.media_time_at_initialized(host_ticks);
         let offset_error = media_time - predicted_media;
 
-        // Estimate the instantaneous rate from this pair of observations and
-        // smooth it in. Both ends are measurements: the mapping's own
-        // prediction error must not be read as rate.
-        if self.rate_baseline {
-            let dt_host = host_ticks - self.last_host;
-            let dt_media = media_time - self.last_media;
-            let observed_rate = dt_media / dt_host as f64;
-            self.rate = self.rate_alpha * observed_rate + (1.0 - self.rate_alpha) * self.rate;
+        // Estimate the rate since the baseline observation and smooth it in.
+        // Both ends are measurements: the mapping's own prediction error must
+        // not be read as rate. Too short a span keeps the baseline for a
+        // later observation.
+        match self.rate_baseline {
+            Some((base_host, base_media)) => {
+                let dt_host = host_ticks - base_host;
+                if dt_host >= self.min_rate_span {
+                    let observed_rate = (media_time - base_media) / dt_host as f64;
+                    self.rate =
+                        self.rate_alpha * observed_rate + (1.0 - self.rate_alpha) * self.rate;
+                    self.rate_baseline = Some((host_ticks, media_time));
+                }
+            }
+            None => self.rate_baseline = Some((host_ticks, media_time)),
         }
 
         // Move the epoch to this observation with a smoothed offset
@@ -214,7 +242,6 @@ impl AffineClock {
 
         self.last_host = host_ticks;
         self.last_media = media_time;
-        self.rate_baseline = true;
         AffineClockUpdate::Smoothed
     }
 
@@ -239,7 +266,7 @@ impl AffineClock {
         self.epoch_media = media_time;
         self.last_host = host.ticks();
         self.last_media = media_time;
-        self.rate_baseline = true;
+        self.rate_baseline = Some((host.ticks(), media_time));
         self.initialized = true;
     }
 
@@ -267,12 +294,12 @@ impl AffineClock {
             self.initial_rate = rate;
             self.epoch_host = anchor_host;
             self.epoch_media = anchor_media;
-            // The last observation still measures the new rate if the change
-            // happened at it. Otherwise the span from it to the next one is
-            // mixed, so the next observation only becomes the new baseline.
-            if anchor_host > self.last_host {
-                self.rate_baseline = false;
-            }
+            // A rate change at the last observation leaves only the new rate
+            // after it, so the next estimate can start there. Otherwise the
+            // span to the next observation is mixed, so that observation
+            // only becomes the new baseline.
+            self.rate_baseline =
+                (anchor_host == self.last_host).then_some((self.last_host, self.last_media));
         } else {
             self.rate = rate;
             self.initial_rate = rate;
@@ -298,7 +325,7 @@ impl AffineClock {
         self.initialized = false;
         self.last_host = 0;
         self.last_media = 0.0;
-        self.rate_baseline = false;
+        self.rate_baseline = None;
     }
 }
 
@@ -518,6 +545,31 @@ mod tests {
         );
 
         assert_eq!(clock.media_time_at(host(2_500_000_000)).unwrap(), before);
+    }
+
+    #[test]
+    fn close_observations_wait_for_the_minimum_rate_span() {
+        let mut clock = AffineClock::new(1e-9, 0.5, 0.5).with_min_rate_span(Duration(1_000_000));
+        clock.update(host(0), 0.0);
+        clock.update(host(1_000_000_000), 1.0);
+        // 10 us later with 90 us of timestamp jitter: a 10x instantaneous
+        // rate if estimated from this pair.
+        clock.update(host(1_000_010_000), 1.000_1);
+        assert_eq!(clock.rate(), 1e-9);
+
+        // The next estimate spans back to the baseline at 1 s instead.
+        clock.update(host(2_000_000_000), 2.0);
+        let rate = clock.rate();
+        assert!((rate - 1e-9).abs() < 1e-13, "learned {rate:e}");
+    }
+
+    #[test]
+    fn without_a_minimum_span_close_observations_estimate_a_rate() {
+        let mut clock = AffineClock::new(1e-9, 0.5, 0.5);
+        clock.update(host(0), 0.0);
+        clock.update(host(1_000_000_000), 1.0);
+        clock.update(host(1_000_010_000), 1.000_1);
+        assert!(clock.rate() > 5e-9);
     }
 
     /// A deterministic jitter source in `-1.0..1.0`.
