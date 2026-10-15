@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn notify_msc_does_not_report_an_application_frame_as_presented() {
         use frameclock::{
-            Duration, FrameBeginResult, FrameDemand, FrameDriver, FrameOpportunity,
+            DisplayTiming, Duration, FrameBeginResult, FrameDemand, FrameDriver, FrameOpportunity,
             FrameSubmission, SchedulerConfig,
         };
 
@@ -310,7 +310,10 @@ mod tests {
         ticker.on_complete_notify(Clock::Monotonic, 1_016_667, 101);
         let tick = ticker.poll_tick().unwrap();
         assert_eq!(tick.prev_actual_present, None);
-        let begin = driver.begin_frame(crate::frame_opportunity(tick, Duration(16_667_000)));
+        let begin = driver.begin_frame(crate::frame_opportunity(
+            tick,
+            DisplayTiming::fixed(Duration(16_667_000)),
+        ));
         assert!(
             begin.resolved_feedback.is_none(),
             "a vblank must not resolve deferred application presentation"
