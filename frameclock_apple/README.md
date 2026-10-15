@@ -26,10 +26,11 @@ CADisplayLink / CVDisplayLink -> FrameTick
                               -> FrameTimingSummary
 ```
 
-Use `DisplayLink` when an application wants this crate to create an Apple
-display-link tick source. The default `ca-display-link` feature exposes a
-main-thread `CADisplayLink` wrapper. The `cv-display-link` feature exposes the
-legacy `CVDisplayLink` wrapper and forwarding types for sending ticks to a
+Use `CaDisplayLink` or `CvDisplayLink` when an application wants this crate
+to create an Apple display-link tick source. The default `ca-display-link`
+feature exposes `CaDisplayLink`, a main-thread `CADisplayLink` wrapper. The
+`cv-display-link` feature exposes `CvDisplayLink`, a legacy macOS
+`CVDisplayLink` wrapper, and forwarding types for sending its ticks to a
 single-threaded host scheduler.
 
 Use `FrameDriver` when an application wants retained frame lifecycle state:
@@ -46,7 +47,7 @@ use frameclock::{
     DisplayTiming, Duration, FrameBeginResult, FrameDemand, FrameDriver,
     OutputId, SchedulerConfig,
 };
-use frameclock_apple::DisplayLink;
+use frameclock_apple::CaDisplayLink;
 use objc2::MainThreadMarker;
 
 // The display-link callback is a shared `Fn`, so it borrows the driver
@@ -60,7 +61,7 @@ let display_timing = DisplayTiming::fixed(Duration::from_nanos(
 let output = OutputId(0);
 let mtm = MainThreadMarker::new().unwrap();
 
-let display_link = DisplayLink::new(
+let display_link = CaDisplayLink::new(
     move |tick| {
         let mut driver = driver.borrow_mut();
         driver.request(FrameDemand::ANIMATION);
@@ -78,8 +79,7 @@ let display_link = DisplayLink::new(
                 // Prepare and submit Apple rendering work for sample_time.
                 let submit = driver.submit_frame(
                     frame,
-                    frameclock_apple::DEFAULT_FEEDBACK_MODE
-                        .submission(frameclock_apple::now()),
+                    CaDisplayLink::FEEDBACK_MODE.submission(frameclock_apple::now()),
                 );
                 _ = (sample_time, submit.awaiting_actual_present);
             }
@@ -105,17 +105,17 @@ display_link.start();
 
 The root module exposes the Apple integration surface:
 
-- `DisplayLink` for the enabled Apple display-link implementation.
+- `CaDisplayLink` and `CvDisplayLink` for the enabled display-link sources.
 - `now` and `timebase` for Mach host-time conversion.
 - `present_hints`, `display_timing`, and `frame_opportunity` for hosts that own
   `FrameDriver` directly.
-- `AppleFeedbackMode` and `DEFAULT_FEEDBACK_MODE` for turning the enabled
-  display-link source's presentation-feedback facts into `FrameSubmission`.
+- `AppleFeedbackMode`, and each display link's `FEEDBACK_MODE`, for turning
+  that source's presentation-feedback facts into `FrameSubmission`.
 - `preferred_frame_rate_range`, `preferred_frame_rate_range_for_frame`, and
   `PreferredFrameRateRange` for translating a selected frame interval into a
   Core Animation-style ProMotion cadence request.
-- `TickForwarder`, `TickSender`, and `DisplayLinkError` when the
-  `cv-display-link` feature is enabled without `ca-display-link`.
+- `TickForwarder`, `TickSender`, and `CvDisplayLinkError` with the
+  `cv-display-link` feature on macOS.
 
 `frameclock_apple` keeps Apple FFI and thread-model details out of
 `frameclock` proper. Core scheduling policy, frame demand ordering, frame
@@ -149,11 +149,11 @@ from the callback time. Scheduler safety margin remains inside `frameclock`
 planning; it is not baked into Apple platform hints.
 
 Presentation feedback lifecycle is host-owned, while feedback capability comes
-from the selected Apple display-link source. Use
-`DEFAULT_FEEDBACK_MODE.submission(frameclock_apple::now())` when submitting a
-frame. With `CADisplayLink`, the submission waits for the next callback because
-`CADisplayLink.timestamp` reports the previous callback's actual display time;
-the next `FrameDriver::begin_frame` returns the completed
+from the Apple display-link source. Use the source's `FEEDBACK_MODE`, such as
+`CaDisplayLink::FEEDBACK_MODE.submission(frameclock_apple::now())`, when
+submitting a frame. With `CADisplayLink`, the submission waits for the next
+callback because `CADisplayLink.timestamp` reports the previous callback's
+actual display time; the next `FrameDriver::begin_frame` returns the completed
 `FrameTimingSummary` in `FrameBegin::resolved_feedback` when the tick carries
 `prev_actual_present`. With `CVDisplayLink`, the submission completes at commit
 time because this adapter does not synthesize actual-present timestamps from
@@ -165,16 +165,19 @@ between displays or the platform reports a different display mode. For
 ProMotion/VRR displays, pass `DisplayTiming::variable` for the current output
 and use `preferred_frame_rate_range_for_frame`,
 `preferred_frame_rate_range`, or
-`DisplayLink::set_preferred_frame_interval` to translate a planned
+`CaDisplayLink::set_preferred_frame_interval` to translate a planned
 `FramePlan::frame_interval` into a Core Animation frame-rate range.
 
 ## Feature Flags
 
 - `ca-display-link`: enables `CADisplayLink` support and is enabled by
   default.
-- `cv-display-link`: enables legacy `CVDisplayLink` support. This feature is
-  intended for hosts that need a Core Video display link and a forwarding path
-  back to a single-threaded scheduler.
+- `cv-display-link`: enables legacy `CVDisplayLink` support on macOS. This
+  feature is intended for hosts that need a Core Video display link and a
+  forwarding path back to a single-threaded scheduler.
+
+The features are independent, so enabling one never removes the other's
+types.
 
 This crate keeps its own implementation `no_std`, but the selected Objective-C
 framework bindings currently require `std`. It is validated on supported Apple

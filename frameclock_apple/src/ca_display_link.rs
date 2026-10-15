@@ -15,7 +15,7 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_se
 use objc2_foundation::{NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes};
 use objc2_quartz_core::{CACurrentMediaTime, CADisplayLink as CADisplayLinkRaw, CAFrameRateRange};
 
-use crate::{PreferredFrameRateRange, mach_time, preferred_frame_rate_range};
+use crate::{AppleFeedbackMode, PreferredFrameRateRange, mach_time, preferred_frame_rate_range};
 
 struct DisplayLinkTargetIvars {
     callback: Box<dyn Fn(FrameTick)>,
@@ -100,20 +100,25 @@ impl DisplayLinkTarget {
 
 /// Safe wrapper around `CADisplayLink` that produces [`FrameTick`] events on
 /// the main thread.
-pub struct DisplayLink {
+pub struct CaDisplayLink {
     raw: Retained<CADisplayLinkRaw>,
     target: Retained<DisplayLinkTarget>,
 }
 
-impl fmt::Debug for DisplayLink {
+impl fmt::Debug for CaDisplayLink {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DisplayLink")
+        f.debug_struct("CaDisplayLink")
             .field("paused", &self.raw.isPaused())
             .finish_non_exhaustive()
     }
 }
 
-impl DisplayLink {
+impl CaDisplayLink {
+    /// The presentation feedback this display link provides: each tick
+    /// reports the previous refresh, which resolves a frame submitted on the
+    /// tick before it.
+    pub const FEEDBACK_MODE: AppleFeedbackMode = AppleFeedbackMode::DeferredActualPresent;
+
     /// Returns the Mach absolute time timebase.
     #[must_use]
     pub fn timebase() -> Timebase {
@@ -221,7 +226,7 @@ impl DisplayLink {
     }
 }
 
-impl Drop for DisplayLink {
+impl Drop for CaDisplayLink {
     fn drop(&mut self) {
         self.stop();
     }
