@@ -4,7 +4,7 @@
 //! Presentation feedback contracts and queueing.
 
 use crate::queue::BoundedQueue;
-use frameclock::{Duration, HostTime, OutputId};
+use frameclock::{Duration, HostTime, OutputId, PresentOutcome};
 
 /// Unique identity for one `wl_surface.commit` submission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -44,6 +44,27 @@ pub enum PresentEvent {
         /// Identity of the commit this event corresponds to.
         id: SubmissionId,
     },
+}
+
+impl PresentEvent {
+    /// Returns the commit this event corresponds to.
+    #[must_use]
+    pub const fn id(self) -> SubmissionId {
+        match self {
+            Self::Presented { id, .. } | Self::Discarded { id } => id,
+        }
+    }
+
+    /// Returns what the compositor did with the commit, as reported to
+    /// [`frameclock::FrameDriver::report_frame`]: presented at its actual
+    /// present time, or never presented when it was discarded.
+    #[must_use]
+    pub const fn outcome(self) -> PresentOutcome {
+        match self {
+            Self::Presented { actual_present, .. } => PresentOutcome::Presented(actual_present),
+            Self::Discarded { .. } => PresentOutcome::NotPresented,
+        }
+    }
 }
 
 /// Bounded FIFO queue for [`PresentEvent`] values.
@@ -109,7 +130,29 @@ impl Default for PresentEventQueue {
 mod tests {
     use super::{PresentEvent, PresentEventQueue, SubmissionId, presentation_time_to_host_time};
     use frameclock::OutputId;
-    use frameclock::{Duration, HostTime};
+    use frameclock::{Duration, HostTime, PresentOutcome};
+
+    #[test]
+    fn events_report_their_commit_and_outcome() {
+        let presented = PresentEvent::Presented {
+            id: SubmissionId(7),
+            actual_present: HostTime(1_000),
+            refresh_interval: None,
+            output: None,
+            flags: 0,
+        };
+        assert_eq!(presented.id(), SubmissionId(7));
+        assert_eq!(
+            presented.outcome(),
+            PresentOutcome::Presented(HostTime(1_000))
+        );
+
+        let discarded = PresentEvent::Discarded {
+            id: SubmissionId(8),
+        };
+        assert_eq!(discarded.id(), SubmissionId(8));
+        assert_eq!(discarded.outcome(), PresentOutcome::NotPresented);
+    }
 
     #[test]
     fn queue_overflow_drops_oldest_event() {

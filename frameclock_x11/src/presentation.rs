@@ -12,7 +12,7 @@
 
 use crate::queue::BoundedQueue;
 use crate::time::ust_to_host_time;
-use frameclock::{HostTime, OutputId};
+use frameclock::{HostTime, OutputId, PresentOutcome};
 
 /// Unique identity for one `PresentPixmap` submission.
 ///
@@ -68,6 +68,35 @@ impl PresentEvent {
             msc,
             output,
             mode,
+        }
+    }
+
+    /// Returns the submission this event corresponds to.
+    #[must_use]
+    pub const fn id(self) -> SubmissionId {
+        match self {
+            Self::Complete { id, .. } | Self::Idle { id } => id,
+        }
+    }
+
+    /// Returns what the server did with the pixmap, as reported to
+    /// [`frameclock::FrameDriver::report_frame`], or `None` for an idle
+    /// notification, which says nothing about presentation.
+    ///
+    /// `Copy` (0), `Flip` (1), and `SuboptimalCopy` (3) completions were
+    /// presented at [`Self::actual_present`]. A `Skip` (2) was never
+    /// presented, and an unknown mode is [`PresentOutcome::Unknown`].
+    #[must_use]
+    pub const fn outcome(self) -> Option<PresentOutcome> {
+        match self {
+            Self::Complete {
+                completed_at,
+                mode: 0 | 1 | 3,
+                ..
+            } => Some(PresentOutcome::Presented(completed_at)),
+            Self::Complete { mode: 2, .. } => Some(PresentOutcome::NotPresented),
+            Self::Complete { .. } => Some(PresentOutcome::Unknown),
+            Self::Idle { .. } => None,
         }
     }
 
@@ -153,6 +182,28 @@ mod tests {
     use super::{PresentEvent, PresentEventQueue, SubmissionId};
     use crate::time::ust_to_host_time;
     use frameclock::OutputId;
+    use frameclock::PresentOutcome;
+
+    #[test]
+    fn events_report_their_submission_and_outcome() {
+        let complete = |mode| PresentEvent::completed(SubmissionId(4), 1_000, 9, None, mode);
+        let at = ust_to_host_time(1_000);
+        for mode in [0, 1, 3] {
+            assert_eq!(
+                complete(mode).outcome(),
+                Some(PresentOutcome::Presented(at))
+            );
+        }
+        assert_eq!(complete(2).outcome(), Some(PresentOutcome::NotPresented));
+        assert_eq!(complete(9).outcome(), Some(PresentOutcome::Unknown));
+        assert_eq!(complete(0).id(), SubmissionId(4));
+
+        let idle = PresentEvent::Idle {
+            id: SubmissionId(5),
+        };
+        assert_eq!(idle.id(), SubmissionId(5));
+        assert_eq!(idle.outcome(), None);
+    }
 
     #[test]
     fn completed_helper_converts_ust_to_host_ticks() {
