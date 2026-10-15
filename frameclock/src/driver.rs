@@ -881,6 +881,12 @@ impl FrameDriver {
         }
 
         self.pending_frame = None;
+        if !frame.hints.starts_at_tick() {
+            // The host woke for this frame; a tick-started one waits for a
+            // tick by design.
+            self.scheduler
+                .observe_wake(now.saturating_duration_since(frame.plan.frame_start));
+        }
         let frame = self.consume_frame_index(frame);
         if now > frame.plan.commit_deadline {
             return Some(DriverBeginResult::Expired(frame));
@@ -950,6 +956,7 @@ mod tests {
         PresentFeedbackEvent, SchedulerStateEvent, SubmitEvent,
     };
     use crate::output::OutputId;
+    use crate::scheduler::SchedulerState;
     use crate::time::{Duration, Timebase};
     use crate::timing::{DisplayTiming, PresentFeedback, PresentationTiming};
 
@@ -1142,8 +1149,14 @@ mod tests {
         assert_eq!(summary.commit_deadline, HostTime(100));
         assert_eq!(summary.submitted_at, None);
         assert_eq!(summary.drop_reason, Some(FrameDropReason::MissedDeadline));
-        assert_eq!(summary.scheduler_state, Some(state_before));
-        assert_eq!(driver.scheduler().state(), state_before);
+        // The frame's work never ran, so only the late wake, 11 ticks after
+        // its start, teaches the scheduler: 1.5 times that.
+        let after = SchedulerState {
+            wake_lateness_ticks: 16,
+            ..state_before
+        };
+        assert_eq!(summary.scheduler_state, Some(after));
+        assert_eq!(driver.scheduler().state(), after);
         assert_eq!(driver.next_frame_start(), None);
     }
 
@@ -1932,5 +1945,46 @@ mod tests {
         let hints = hints(1_100).starting_at_tick().starting_when_planned();
         assert!(!hints.starts_at_tick());
         assert_eq!(hints, self::hints(1_100));
+    }
+
+    #[test]
+    fn late_wakes_move_later_frame_starts_earlier() {
+        let mut driver = driver();
+        for _ in 0..2 {
+            driver.request(FrameDemand::ANIMATION);
+            let FrameBeginResult::WaitUntil(start) = begin_at(&mut driver, 0) else {
+                panic!("an animation frame starts as late as its margins allow");
+            };
+            // The host's timer fires 4 ticks late.
+            let FrameBeginResult::Ready(frame) =
+                driver.begin_pending_frame(HostTime(start.ticks() + 4))
+            else {
+                panic!("a wake before the deadline releases the frame");
+            };
+            let _ = driver.discard_frame(frame);
+        }
+        // 1.5 times the 4-tick lateness.
+        assert_eq!(driver.scheduler().wake_lateness_ticks(), 6);
+
+        driver.request(FrameDemand::ANIMATION);
+        assert!(matches!(
+            begin_at(&mut driver, 0),
+            FrameBeginResult::WaitUntil(HostTime(84))
+        ));
+    }
+
+    #[test]
+    fn frames_started_by_ticks_teach_no_wake_lateness() {
+        let mut driver = driver();
+        driver.request(FrameDemand::BACKGROUND);
+        let _ = driver.begin_frame(tick_started_opportunity(1_000));
+        let FrameBeginResult::Ready(frame) = driver
+            .begin_frame(tick_started_opportunity(1_000 + REFRESH_INTERVAL.ticks()))
+            .result
+        else {
+            panic!("the next tick releases the frame");
+        };
+        let _ = driver.discard_frame(frame);
+        assert_eq!(driver.scheduler().wake_lateness_ticks(), 0);
     }
 }
