@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn driver_returns_ready_frame_for_due_demand() {
         let tick = test_tick();
-        let mut config = SchedulerConfig::pacing_only();
+        let mut config = SchedulerConfig::pacing_only(TIMEBASE);
         config.initial_depth = 1;
         config.minimum_frame_start_margin = Duration::ZERO;
         let mut driver = FrameDriver::new(config);

@@ -13,6 +13,7 @@ use frameclock::diagnostics::{
     PresentFeedbackEvent, SchedulerStateEvent, SubmitEvent,
 };
 use frameclock::scheduler::Scheduler;
+use frameclock::time::Timebase;
 use frameclock::timing::PresentFeedback;
 use frameclock::{
     DisplayTiming, Duration, FrameDemand, FrameOpportunity, FrameTick, FrameTimingSummary,
@@ -72,7 +73,7 @@ impl DiagnosticsSink for SummarySink {
 }
 
 fn main() {
-    let mut scheduler = Scheduler::new(SchedulerConfig::predictive());
+    let mut scheduler = Scheduler::new(SchedulerConfig::predictive(Timebase::NANOS));
     let mut sink = SummarySink::default();
 
     {

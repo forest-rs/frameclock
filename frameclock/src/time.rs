@@ -223,6 +223,11 @@ impl fmt::Debug for Timebase {
 /// deadlines; app code can convert to or from nanoseconds with the backend's
 /// [`Timebase`] when it needs human-readable diagnostics or platform APIs that
 /// use nanoseconds.
+///
+/// `Duration(n)` is `n` ticks, which are nanoseconds on some platforms only:
+/// `Duration(16_666_667)` is 16.7 ms on Linux but about 0.7 s in Apple Mach
+/// ticks and 1.7 s in Windows QPC ticks. Write a duration from nanoseconds
+/// with [`Duration::from_nanos`] and the platform adapter's `timebase()`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Duration(pub u64);
 
