@@ -4,6 +4,7 @@
 //! Stateful media timeline wrapper.
 
 use crate::{AffineClock, AffineClockUpdate};
+use frameclock::time::Timebase;
 use frameclock::{Duration, HostTime};
 
 /// Host-facing media timeline built on [`AffineClock`].
@@ -59,6 +60,15 @@ impl MediaTimeline {
             Self::DEFAULT_OFFSET_ALPHA,
             Self::DEFAULT_DISCONTINUITY_THRESHOLD,
         )
+    }
+
+    /// Creates a media timeline for host times in `timebase`, such as a
+    /// platform adapter's `timebase()`.
+    ///
+    /// This is [`new`](Self::new) with the timebase's tick length in seconds.
+    #[must_use]
+    pub fn for_timebase(timebase: Timebase) -> Self {
+        Self::new(seconds_per_tick(timebase))
     }
 
     /// Creates a media timeline with explicit smoothing and discontinuity
@@ -247,6 +257,11 @@ impl MediaTimeline {
     }
 }
 
+/// The length of one tick of `timebase`, in seconds.
+fn seconds_per_tick(timebase: Timebase) -> f64 {
+    f64::from(timebase.numer()) / f64::from(timebase.denom()) * 1e-9
+}
+
 /// Converts `seconds` of host time to the nearest whole host tick, or zero if
 /// the tick length is not positive.
 #[expect(
@@ -317,6 +332,21 @@ mod tests {
         assert_eq!(timeline.effective_rate(), 2e-9);
         assert!((timeline.media_time_at(host(1_000_000_000)).unwrap() - 1.0).abs() < 1e-12);
         assert!((timeline.media_time_at(host(2_000_000_000)).unwrap() - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn for_timebase_uses_the_tick_length() {
+        assert_eq!(
+            MediaTimeline::for_timebase(Timebase::NANOS).effective_rate(),
+            1e-9
+        );
+
+        // Mach ticks on Apple silicon: 125/3 ns each. One second of ticks
+        // is one second of media.
+        let mut timeline = MediaTimeline::for_timebase(Timebase::new(125, 3));
+        timeline.observe(host(0), 0.0);
+        let media = timeline.media_time_at(host(24_000_000)).unwrap();
+        assert!((media - 1.0).abs() < 1e-12, "got {media}");
     }
 
     #[test]
