@@ -73,6 +73,10 @@ pub enum Clock {
     MonotonicRaw,
     /// Windows performance counter, whose native units require a timebase.
     PerformanceCounter,
+    /// Implementation-defined GOOGLE presentation clock, such as `MoltenVK`'s
+    /// Core Animation media clock in nanoseconds. It requires an explicit
+    /// host correlation and is not a Vulkan calibrated-timestamp domain.
+    Presentation,
     /// An opaque clock local to a swapchain.
     SwapchainLocal,
     /// An opaque clock local to a swapchain and one presentation stage.
