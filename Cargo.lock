@@ -79,6 +79,9 @@ name = "ash"
 version = "0.38.0+1.3.281"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bb44936d800fea8f016d7f2311c6a4f97aebd5dc86f09906139ec848cf3a46f"
+dependencies = [
+ "libloading",
+]
 
 [[package]]
 name = "atomic-waker"
@@ -1103,6 +1106,10 @@ dependencies = [
  "frameclock_android",
  "frameclock_vulkan",
  "ndk-sys",
+ "objc2 0.6.4",
+ "objc2-core-foundation",
+ "objc2-quartz-core 0.3.2",
+ "winit",
 ]
 
 [[package]]
