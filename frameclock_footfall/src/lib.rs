@@ -8,14 +8,18 @@
 //! frames missed the display, by how much, and what their work did
 //! differently:
 //!
+//! - [`Recorder::opportunity`] records each frame opportunity the platform
+//!   offers, whether or not a frame starts at it, so analysis can tell a
+//!   frame the platform made wait from one the program started late.
 //! - [`Recorder::begin_frame`] and [`Recorder::end_frame`] delimit the frame's
 //!   CPU work with Footfall frame markers numbered by frameclock's frame
 //!   index.
 //! - [`Recorder::record`] turns each [`FrameTimingSummary`] into frame points:
-//!   the platform's prediction, the commit deadline with the scheduler state
-//!   the plan was made with, the target, sample, and expected present times,
-//!   when the frame was submitted, and when it was shown, or that it never
-//!   was and why.
+//!   when the frame was to start, and whether it waited for a tick or a
+//!   wake, the platform's prediction, the commit deadline with the scheduler
+//!   state the plan was made with, the target, sample, and expected present
+//!   times, when the frame was submitted, and when it was shown, or that it
+//!   never was and why.
 //! - [`Recorder::sync`] records the host clock against Footfall's own, so
 //!   analysis can place those times.
 //!
@@ -45,11 +49,9 @@
 //!
 //! let now = HostTime(1_000_000);
 //! recorder.sync(now);
-//! let begin = driver.begin_frame(FrameOpportunity::pacing_only(
-//!     now,
-//!     Duration(16_666_667),
-//!     OutputId(0),
-//! ));
+//! let opportunity = FrameOpportunity::pacing_only(now, Duration(16_666_667), OutputId(0));
+//! recorder.opportunity(&opportunity);
+//! let begin = driver.begin_frame(opportunity);
 //! if let Some(summary) = &begin.resolved_feedback {
 //!     recorder.record(summary);
 //! }
@@ -69,13 +71,13 @@
 #![no_std]
 
 use footfall_core::{
-    Args, ClockDesc, ClockReading, ContextHandle, CounterDesc, DropReason, FrameNumber, FramePoint,
-    FramePointKind, FrameStream, TickPeriod, TimingBasis, Unit,
+    Args, BeginsAt, ClockDesc, ClockReading, ContextHandle, CounterDesc, DropReason, FrameNumber,
+    FramePoint, FramePointKind, FrameStream, TickPeriod, TimingBasis, Unit,
 };
 use frameclock::diagnostics::{DiagnosticsSink, FrameDropReason, FrameTimingBasis};
 use frameclock::time::Timebase;
 use frameclock::timing::PresentationTiming;
-use frameclock::{ActiveFrame, FrameTimingSummary, HostTime};
+use frameclock::{ActiveFrame, FrameOpportunity, FrameTimingSummary, HostTime};
 
 /// The clock frameclock's [`HostTime`] values are read from: Mach absolute
 /// time on Apple platforms, `QueryPerformanceCounter` on Windows, the clock
@@ -185,6 +187,32 @@ impl Recorder {
         footfall_core::clock_sync(self.reading(now));
     }
 
+    /// Records a frame opportunity the platform offered, at its tick's time
+    /// and with its tick's refresh interval, in the recorder's
+    /// [`stream`](Self::stream).
+    ///
+    /// Call it with every opportunity passed to
+    /// [`FrameDriver::begin_frame`](frameclock::FrameDriver::begin_frame),
+    /// including those at which no frame starts. A frame that
+    /// [starts at a tick](frameclock::PresentHints::starting_at_tick) is
+    /// judged against them: begun at the first opportunity from its start,
+    /// or late, and if that opportunity came later than its tick's interval
+    /// said it would, made late by the platform.
+    pub fn opportunity(&self, opportunity: &FrameOpportunity) {
+        let tick = &opportunity.tick;
+        let mut offered = footfall_core::FrameOpportunity::at(
+            self.stream,
+            &HOST_CLOCK,
+            self.period(),
+            tick.now.ticks(),
+        )
+        .with_args(Args::none().with("output", tick.output.0));
+        if let Some(interval) = tick.refresh_interval {
+            offered = offered.with_interval(interval.ticks());
+        }
+        footfall_core::frame_opportunity(&offered);
+    }
+
     /// Marks the start of `frame`'s CPU work, numbered by its frame index.
     ///
     /// Call it once [`FrameDriver::begin_frame`](frameclock::FrameDriver::begin_frame)
@@ -218,6 +246,7 @@ impl Recorder {
     ///
     /// | Summary field | Frame point | Basis | Args |
     /// | --- | --- | --- | --- |
+    /// | `frame_start`, `starts_at_tick` | [`Scheduled`](FramePointKind::Scheduled), beginning at an [`Opportunity`](BeginsAt::Opportunity) or the [`Time`](BeginsAt::Time) | | |
     /// | `predicted_present` | [`Predicted`](FramePointKind::Predicted) | | `presentation_timing` |
     /// | `commit_deadline` | [`Deadline`](FramePointKind::Deadline) | | the plan's scheduler state, below |
     /// | `target_present` | [`Target`](FramePointKind::Target) | | |
@@ -244,6 +273,16 @@ impl Recorder {
     /// [`context`](Self::context).
     pub fn record(&self, summary: &FrameTimingSummary) {
         let number = self.number(summary.frame_index);
+        let begins_at = if summary.starts_at_tick {
+            BeginsAt::Opportunity
+        } else {
+            BeginsAt::Time
+        };
+        footfall_core::frame_point(&self.at(
+            number,
+            FramePointKind::Scheduled(begins_at),
+            summary.frame_start,
+        ));
         if let Some(at) = summary.predicted_present {
             footfall_core::frame_point(&self.at(number, FramePointKind::Predicted, at).with_args(
                 Args::none().with(

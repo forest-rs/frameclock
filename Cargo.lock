@@ -317,8 +317,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 [[package]]
 name = "footfall_analysis"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12a0b2c9c3cbcff8da727a738bae38e035e46d47e39a8d745cce0a25cda7db5e"
+source = "git+https://github.com/forest-rs/footfall?rev=221cd8ef3cc5760884c4b95b6a0860306036dcc0#221cd8ef3cc5760884c4b95b6a0860306036dcc0"
 dependencies = [
  "footfall_core",
  "footfall_runtime",
@@ -329,14 +328,12 @@ dependencies = [
 [[package]]
 name = "footfall_core"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db020d5500dbddd4cf30551c3c4b059b5bb81c0e566dc228e292a7af73afe988"
+source = "git+https://github.com/forest-rs/footfall?rev=221cd8ef3cc5760884c4b95b6a0860306036dcc0#221cd8ef3cc5760884c4b95b6a0860306036dcc0"
 
 [[package]]
 name = "footfall_runtime"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cd557dcfc02137b43c291ab6bbe7acc2be363126028c911d76970b9a6153e4d"
+source = "git+https://github.com/forest-rs/footfall?rev=221cd8ef3cc5760884c4b95b6a0860306036dcc0#221cd8ef3cc5760884c4b95b6a0860306036dcc0"
 dependencies = [
  "footfall_core",
  "hashbrown 0.17.1",
@@ -345,8 +342,7 @@ dependencies = [
 [[package]]
 name = "footfall_session"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20eb90d4c918b8be434220d6e9e3b1ed0af6a241f32d571c30848bd07a0ab711"
+source = "git+https://github.com/forest-rs/footfall?rev=221cd8ef3cc5760884c4b95b6a0860306036dcc0#221cd8ef3cc5760884c4b95b6a0860306036dcc0"
 dependencies = [
  "footfall_core",
  "footfall_runtime",
