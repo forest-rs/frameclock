@@ -599,7 +599,10 @@ impl FrameDriver {
     /// returns [`FrameBeginResult::Wait`] with what will release it.
     ///
     /// When a queued frame becomes ready before its commit deadline, the
-    /// returned [`ActiveFrame`] carries the original planning tick and plan. Its
+    /// returned [`ActiveFrame`] normally carries the original planning tick and
+    /// plan. For [`PresentHints::selected_timeline`], its tick, presentation
+    /// target, deadline, and output instead describe the releasing callback's
+    /// resource. Cadence and demand remain those of the queued plan. Its
     /// [`ActiveFrame::build_start`] is the current opportunity time that
     /// released the queued frame. If the queued frame is released after its
     /// commit deadline, the driver returns [`FrameBeginResult::Expired`]
@@ -627,9 +630,16 @@ impl FrameDriver {
     /// commit deadline. This returns [`Wait`](FrameBeginResult::Wait) again
     /// if `now` is still early, and [`Idle`](FrameBeginResult::Idle) when no
     /// frame is queued. It plans no new frame: pending demand waits
-    /// for the next [`begin_frame`](Self::begin_frame).
+    /// for the next [`begin_frame`](Self::begin_frame). Tick-started frames
+    /// always return [`FrameWait::NextTick`]; a timer cannot release them.
     #[must_use]
     pub fn begin_pending_frame(&mut self, now: HostTime) -> FrameBeginResult {
+        if self
+            .pending_frame
+            .is_some_and(|frame| frame.hints.starts_at_tick())
+        {
+            return FrameBeginResult::Wait(FrameWait::NextTick);
+        }
         let result = self.take_pending(now).unwrap_or(DriverBeginResult::Idle);
         self.begin_result(result, now)
     }
@@ -947,8 +957,7 @@ impl FrameDriver {
 
     fn take_next(&mut self, opportunity: FrameOpportunity) -> DriverBeginResult {
         let tick = opportunity.tick;
-        if opportunity.hints.has_hard_deadline()
-            && let Some(frame) = self.pending_frame.as_mut()
+        if let Some(frame) = self.pending_frame.as_mut()
             && tick.now >= frame.plan.frame_start
         {
             // The releasing opportunity's resource is the one the frame will
@@ -956,7 +965,22 @@ impl FrameDriver {
             // than planned, as when the tick the plan expected never came. A
             // tick the frame still waits through offers a resource it will
             // not use.
-            frame.plan.commit_deadline = opportunity.hints.latest_commit();
+            if opportunity.hints.has_hard_deadline() {
+                frame.plan.commit_deadline = opportunity.hints.latest_commit();
+            }
+            if frame.hints.has_selected_timeline() || opportunity.hints.has_selected_timeline() {
+                // The ready frame uses this callback's resource. Preserve
+                // scheduling intent, but bind presentation facts and identity
+                // to the opportunity that actually releases it.
+                frame.tick = opportunity.tick;
+                frame.hints = opportunity.hints;
+                frame.plan.commit_deadline = opportunity.hints.latest_commit();
+                frame.plan.target_present = opportunity.hints.desired_present();
+                frame.plan.sample_time = opportunity.hints.desired_present().unwrap_or(tick.now);
+                frame.plan.presentation_timing = opportunity.hints.presentation_timing();
+                frame.plan.output = opportunity.tick.output;
+                frame.plan.present_latency = Duration::ZERO;
+            }
         }
         if let Some(result) = self.take_pending(tick.now) {
             return result;
@@ -2148,6 +2172,87 @@ mod tests {
             panic!("the next tick's resource still has time");
         };
         assert_eq!(frame.plan().commit_deadline, HostTime(1_290));
+    }
+
+    fn native_opportunity(now: u64, target: u64, deadline: u64, output: u32) -> FrameOpportunity {
+        let mut opportunity = predictive_opportunity(now, 0, target, deadline);
+        opportunity.tick.output = OutputId(output);
+        opportunity.hints = PresentHints::selected_timeline(HostTime(target), HostTime(deadline));
+        opportunity
+    }
+
+    #[test]
+    fn a_native_timeline_keeps_its_target_with_pipeline_depth_and_latency() {
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
+        config.initial_depth = 2;
+        config.present_latency_alpha = 1.0;
+        let mut driver = FrameDriver::new(config);
+        driver.request(FrameDemand::INPUT);
+        let FrameBeginResult::Ready(frame) = driver
+            .begin_frame(native_opportunity(1_000, 1_100, 1_090, 0))
+            .result
+        else {
+            panic!("input starts immediately")
+        };
+        let _ = driver.submit_frame(
+            frame,
+            FrameSubmission::new(HostTime(1_020), Some(HostTime(1_200))),
+        );
+        assert_eq!(driver.scheduler().present_latency_ticks(), 100);
+        driver.request(FrameDemand::ANIMATION);
+        let FrameBeginResult::Ready(frame) = driver
+            .begin_frame(native_opportunity(2_000, 2_100, 2_090, 0))
+            .result
+        else {
+            panic!("native animation starts at callback")
+        };
+        assert_eq!(frame.plan().target_present, Some(HostTime(2_100)));
+        assert_eq!(frame.plan().sample_time, HostTime(2_100));
+        assert_eq!(frame.plan().commit_deadline, HostTime(2_090));
+        assert_eq!(frame.plan().present_latency, Duration::ZERO);
+    }
+
+    #[test]
+    fn a_host_wake_cannot_release_a_callback_owned_resource() {
+        let mut driver = driver();
+        driver.request(FrameDemand::BACKGROUND);
+        assert!(matches!(
+            driver
+                .begin_frame(native_opportunity(1_000, 1_100, 1_090, 0))
+                .result,
+            FrameBeginResult::Wait(FrameWait::NextTick)
+        ));
+        assert!(matches!(
+            driver.begin_pending_frame(HostTime(2_000)),
+            FrameBeginResult::Wait(FrameWait::NextTick)
+        ));
+        let opportunity = native_opportunity(2_000, 2_150, 2_090, 7);
+        let FrameBeginResult::Ready(frame) = driver.begin_frame(opportunity).result else {
+            panic!("a fresh callback can release a held frame")
+        };
+        assert_eq!(frame.tick(), opportunity.tick);
+        assert_eq!(frame.plan().target_present, Some(HostTime(2_150)));
+        assert_eq!(frame.plan().sample_time, HostTime(2_150));
+        assert_eq!(frame.plan().output, OutputId(7));
+        assert_eq!(frame.plan().demand, FrameDemand::BACKGROUND);
+    }
+
+    #[test]
+    fn a_native_resource_rebinds_even_when_the_releasing_prediction_is_unavailable() {
+        let mut driver = driver();
+        driver.request(FrameDemand::BACKGROUND);
+        let _ = driver.begin_frame(native_opportunity(1_000, 1_100, 1_090, 0));
+        let opportunity = hard_deadline_opportunity(1_100, 1_180);
+        let FrameBeginResult::Ready(frame) = driver.begin_frame(opportunity).result else {
+            panic!("new resource has a valid deadline")
+        };
+        assert_eq!(frame.tick(), opportunity.tick);
+        assert_eq!(frame.plan().target_present, None);
+        assert_eq!(
+            frame.plan().presentation_timing,
+            PresentationTiming::PacingOnly
+        );
+        assert_eq!(frame.plan().commit_deadline, HostTime(1_180));
     }
 
     #[test]
