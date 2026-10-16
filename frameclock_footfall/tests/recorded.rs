@@ -6,9 +6,9 @@
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use footfall_core::{
-    Backend, ClockReading, ContextHandle, CounterDesc, DropReason, FrameNumber, FramePoint,
-    FramePointKind, FrameStream, InstrumentationLevel, LabelValue, MarkerKind, MarkerPhase,
-    TickPeriod, TimingBasis, Unit,
+    Backend, BeginsAt, ClockReading, ContextHandle, CounterDesc, DropReason, FrameNumber,
+    FrameOpportunity, FramePoint, FramePointKind, FrameStream, InstrumentationLevel, LabelValue,
+    MarkerKind, MarkerPhase, TickPeriod, TimingBasis, Unit,
 };
 use frameclock::diagnostics::{
     FrameDropReason, FramePlanEvent, FrameTickEvent, FrameTimingBasis, FrameTimingSummary,
@@ -31,6 +31,8 @@ enum Seen {
     /// The args of the point just before.
     Args(Vec<(&'static str, LabelValue)>),
     Counter(&'static str, Unit, &'static str, u64),
+    /// A frame opportunity: its stream, ticks, interval, and output arg.
+    Opportunity(FrameStream, u64, Option<u64>, Option<LabelValue>),
 }
 
 /// A point of frame `number` of the default stream, with no basis.
@@ -95,6 +97,25 @@ impl Backend for Recording {
                     .collect(),
             ));
         }
+    }
+
+    fn frame_opportunity(&self, opportunity: &FrameOpportunity) {
+        let time = opportunity.time();
+        assert!(
+            core::ptr::eq(time.clock(), &HOST_CLOCK),
+            "opportunities are in the host clock"
+        );
+        assert_eq!(time.period(), TickPeriod::new(125, 3), "the Mach timebase");
+        self.push(Seen::Opportunity(
+            opportunity.stream(),
+            time.ticks(),
+            opportunity.interval(),
+            opportunity
+                .args()
+                .iter()
+                .find(|arg| arg.key() == "output")
+                .map(|arg| arg.value()),
+        ));
     }
 
     fn counter_add(&self, desc: &'static CounterDesc, _context: ContextHandle, value: u64) {
@@ -202,6 +223,7 @@ fn a_shown_frame_records_every_time_frameclock_knows_in_host_ticks() {
     assert_eq!(
         taken(backend),
         [
+            point(1234, FramePointKind::Scheduled(BeginsAt::Time), Some(1_200)),
             point(1234, FramePointKind::Predicted, Some(3_900)),
             Seen::Args(vec![(
                 "presentation_timing",
@@ -243,6 +265,24 @@ fn a_shown_frame_records_every_time_frameclock_knows_in_host_ticks() {
 }
 
 #[test]
+fn a_frame_that_starts_at_a_tick_is_scheduled_to_begin_at_an_opportunity() {
+    let (backend, _serial) = recording();
+    let mut held = summary(11);
+    held.starts_at_tick = true;
+    held.frame_start = HostTime(1_500);
+    Recorder::new(MACH).record(&held);
+
+    assert_eq!(
+        taken(backend).first(),
+        Some(&point(
+            11,
+            FramePointKind::Scheduled(BeginsAt::Opportunity),
+            Some(1_500)
+        ))
+    );
+}
+
+#[test]
 fn a_frame_the_display_never_showed_is_not_presented() {
     let (backend, _serial) = recording();
     let mut unshown = summary(7);
@@ -260,6 +300,7 @@ fn a_frame_the_display_never_showed_is_not_presented() {
     assert_eq!(
         points,
         [
+            point(7, FramePointKind::Scheduled(BeginsAt::Time), Some(1_200)),
             point(7, FramePointKind::Predicted, Some(3_900)),
             point(7, FramePointKind::Deadline, Some(3_250)),
             point(7, FramePointKind::Target, Some(4_000)),
@@ -393,6 +434,7 @@ fn a_pacing_only_frame_records_no_present_times() {
     assert_eq!(
         points,
         [
+            point(9, FramePointKind::Scheduled(BeginsAt::Time), Some(1_200)),
             point(9, FramePointKind::Deadline, Some(3_250)),
             point(9, FramePointKind::Sampled, Some(4_000)),
             Seen::Point(
@@ -413,14 +455,13 @@ fn syncs_and_frames_are_in_frameclock_terms() {
     driver.request(FrameDemand::INPUT);
 
     recorder.sync(HostTime(24_000_000));
-    let frameclock::FrameBeginResult::Ready(frame) = driver
-        .begin_frame(frameclock::FrameOpportunity::pacing_only(
-            HostTime(24_000_000),
-            Duration(400_000),
-            OutputId(0),
-        ))
-        .result
-    else {
+    let opportunity = frameclock::FrameOpportunity::pacing_only(
+        HostTime(24_000_000),
+        Duration(400_000),
+        OutputId(3),
+    );
+    recorder.opportunity(&opportunity);
+    let frameclock::FrameBeginResult::Ready(frame) = driver.begin_frame(opportunity).result else {
         panic!("input starts a frame right away");
     };
     let number = frame.plan().frame_index;
@@ -431,6 +472,13 @@ fn syncs_and_frames_are_in_frameclock_terms() {
         taken(backend),
         [
             Seen::Sync(24_000_000),
+            // At the tick's time, with its refresh interval, in host ticks.
+            Seen::Opportunity(
+                FrameStream::DEFAULT,
+                24_000_000,
+                Some(400_000),
+                Some(LabelValue::Unsigned(3))
+            ),
             Seen::Marker(MarkerPhase::Begin, number.into()),
             Seen::Marker(MarkerPhase::End, number.into()),
         ]

@@ -40,9 +40,9 @@ frameclock_x11 = { version = "0.0.1", path = "frameclock_x11" }
 frameclock_web = { version = "0.0.1", path = "frameclock_web" }
 wasm-bindgen = { version = "0.2", default-features = false }
 web-time = { version = "1.1.0" }
-footfall_analysis = "0.1.0"
-footfall_core = "0.1.0"
-footfall_runtime = "0.1.0"
+footfall_analysis = "0.2.0"
+footfall_core = "0.2.0"
+footfall_runtime = "0.2.0"
 
 [workspace.lints]
 # LINEBENDER LINT SET - Cargo.toml - v7
