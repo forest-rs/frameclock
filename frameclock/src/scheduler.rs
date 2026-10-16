@@ -479,6 +479,7 @@ impl Scheduler {
             } else {
                 self.frame_start(tick.now, commit_deadline, demand)
             },
+            starts_at_tick: hints.starts_at_tick(),
             sample_time,
             target_present,
             presentation_timing,

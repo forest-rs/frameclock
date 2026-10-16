@@ -393,6 +393,11 @@ pub struct FramePlan {
     /// time, or half a refresh before the later tick that the selected
     /// cadence waits for.
     pub frame_start: HostTime,
+    /// Whether the frame starts at the first tick from
+    /// [`frame_start`](Self::frame_start) on, rather than when the host
+    /// wakes at it: whether its hints
+    /// [start at a tick](PresentHints::starting_at_tick).
+    pub starts_at_tick: bool,
     /// Time applications should sample animation and simulation state for.
     pub sample_time: HostTime,
     /// Intended display time, if known.
@@ -1010,6 +1015,7 @@ mod tests {
             demand: FrameDemand::ANIMATION,
             frame_interval: Duration(1_000_000),
             frame_start: HostTime(0),
+            starts_at_tick: hints.starts_at_tick(),
             sample_time: hints.desired_present().unwrap_or(hints.latest_commit()),
             target_present: hints.desired_present(),
             presentation_timing: hints.presentation_timing(),
