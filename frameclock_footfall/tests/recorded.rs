@@ -10,7 +10,10 @@ use footfall_core::{
     FramePointKind, FrameStream, InstrumentationLevel, LabelValue, MarkerKind, MarkerPhase,
     TickPeriod, TimingBasis, Unit,
 };
-use frameclock::diagnostics::{FrameDropReason, FrameTimingBasis, FrameTimingSummary};
+use frameclock::diagnostics::{
+    FrameDropReason, FramePlanEvent, FrameTickEvent, FrameTimingBasis, FrameTimingSummary,
+    FrameTimingSummaryBuilder, PresentFeedbackEvent, SchedulerStateEvent, SubmitEvent,
+};
 use frameclock::scheduler::SchedulerState;
 use frameclock::time::Timebase;
 use frameclock::timing::{FrameDemand, PresentationTiming};
@@ -130,39 +133,63 @@ fn taken(backend: &Recording) -> Vec<Seen> {
 }
 
 fn summary(frame_index: u64) -> FrameTimingSummary {
-    FrameTimingSummary {
-        frame_index,
-        output: OutputId(0),
-        timing_basis: FrameTimingBasis::ActualPresent,
-        presentation_timing: PresentationTiming::Predictive,
-        tick_time: HostTime(1_000),
-        predicted_present: Some(HostTime(3_900)),
-        refresh_interval: Some(Duration(3_000)),
-        demand: FrameDemand::ANIMATION,
-        frame_interval: Duration(3_000),
-        frame_start: HostTime(1_200),
-        sample_time: HostTime(4_000),
-        target_present: Some(HostTime(4_000)),
-        commit_deadline: HostTime(3_250),
-        submitted_at: Some(HostTime(2_900)),
-        work: Some(Duration(600)),
-        expected_present: Some(HostTime(4_100)),
-        actual_present: Some(HostTime(7_000)),
-        missed_deadline: Some(true),
-        pacing_overrun: None,
-        drop_reason: None,
-        pipeline_depth: 2,
-        present_latency: Duration(60),
-        safety_margin_ticks: 300,
-        scheduler_state: Some(SchedulerState {
+    let output = OutputId(0);
+    let mut summary = FrameTimingSummaryBuilder::from_tick_and_plan(
+        &FrameTickEvent {
+            frame_index,
+            output,
+            now: HostTime(1_000),
+            predicted_present: Some(HostTime(3_900)),
+            refresh_interval: Some(Duration(3_000)),
+        },
+        &FramePlanEvent {
+            frame_index,
+            output,
+            demand: FrameDemand::ANIMATION,
+            frame_interval: Duration(3_000),
+            frame_start: HostTime(1_200),
+            starts_at_tick: false,
+            sample_time: HostTime(4_000),
+            target_present: Some(HostTime(4_000)),
+            presentation_timing: PresentationTiming::Predictive,
+            commit_deadline: HostTime(3_250),
             pipeline_depth: 2,
-            present_latency_ticks: 30,
+            present_latency: Duration(60),
             safety_margin_ticks: 300,
-            consecutive_misses: 1,
-            consecutive_hits: 0,
-            wake_lateness_ticks: 0,
-        }),
-    }
+        },
+    );
+    summary
+        .record_submit(&SubmitEvent {
+            frame_index,
+            submitted_at: HostTime(2_900),
+            expected_present: Some(HostTime(4_100)),
+        })
+        .record_present_feedback(&PresentFeedbackEvent {
+            frame_index,
+            work: Some(Duration(600)),
+            actual_present: Some(HostTime(7_000)),
+            missed_deadline: Some(true),
+            pacing_overrun: None,
+        })
+        .record_scheduler_state(&SchedulerStateEvent {
+            state: SchedulerState {
+                pipeline_depth: 2,
+                present_latency_ticks: 30,
+                safety_margin_ticks: 300,
+                consecutive_misses: 1,
+                consecutive_hits: 0,
+                wake_lateness_ticks: 0,
+            },
+        });
+    let summary = summary
+        .finish()
+        .expect("the tick and plan describe one frame");
+    assert_eq!(
+        summary.timing_basis,
+        FrameTimingBasis::ActualPresent,
+        "the frame was reported shown"
+    );
+    summary
 }
 
 #[test]

@@ -10,8 +10,9 @@
 
 use crate::demand::FrameDemand;
 use crate::diagnostics::{
-    FrameDropEvent, FrameDropReason, FramePlanEvent, FrameTickEvent, FrameTimingSummary,
-    FrameTimingSummaryBuilder, PresentFeedbackEvent, SchedulerStateEvent, SubmitEvent,
+    FrameBuildEvent, FrameDropEvent, FrameDropReason, FramePlanEvent, FrameTickEvent,
+    FrameTimingSummary, FrameTimingSummaryBuilder, PresentFeedbackEvent, SchedulerStateEvent,
+    SubmitEvent,
 };
 use crate::scheduler::{Scheduler, SchedulerConfig};
 use crate::time::{Duration, HostTime};
@@ -640,12 +641,11 @@ impl FrameDriver {
             DriverBeginResult::Ready(frame) => {
                 FrameBeginResult::Ready(ActiveFrame::new(frame, now))
             }
-            DriverBeginResult::Expired(frame) => {
-                let frame = ActiveFrame::new(frame, now);
-                FrameBeginResult::Expired(
-                    self.discard_frame_with_reason(frame, FrameDropReason::MissedDeadline),
-                )
-            }
+            DriverBeginResult::Expired(frame) => FrameBeginResult::Expired(self.dropped_summary(
+                frame,
+                None,
+                FrameDropReason::MissedDeadline,
+            )),
         }
     }
 
@@ -848,8 +848,13 @@ impl FrameDriver {
         let state_event = SchedulerStateEvent {
             state: self.scheduler.state(),
         };
+        let build_event = FrameBuildEvent {
+            frame_index: plan.frame_index,
+            build_start,
+        };
         let mut summary = FrameTimingSummaryBuilder::from_tick_and_plan(&tick_event, &plan_event);
         summary
+            .record_frame_build(&build_event)
             .record_submit(&submit_event)
             .record_present_feedback(&feedback_event)
             .record_scheduler_state(&state_event);
@@ -881,15 +886,32 @@ impl FrameDriver {
         frame: ActiveFrame,
         reason: FrameDropReason,
     ) -> FrameTimingSummary {
-        let plan = frame.plan();
-        let tick_event = FrameTickEvent::new(plan.frame_index, &frame.tick());
-        let plan_event = FramePlanEvent::new(&plan, frame.safety_margin_ticks());
+        self.dropped_summary(frame.planned, Some(frame.build_start), reason)
+    }
+
+    /// The summary of a frame dropped for `reason`, after its work started
+    /// at `build_start`, or before it started.
+    fn dropped_summary(
+        &mut self,
+        planned: PlannedFrame,
+        build_start: Option<HostTime>,
+        reason: FrameDropReason,
+    ) -> FrameTimingSummary {
+        let plan = planned.plan;
+        let tick_event = FrameTickEvent::new(plan.frame_index, &planned.tick);
+        let plan_event = FramePlanEvent::new(&plan, planned.safety_margin_ticks);
         let drop_event = FrameDropEvent::new(&plan, reason);
         let state_event = SchedulerStateEvent {
             state: self.scheduler.state(),
         };
 
         let mut summary = FrameTimingSummaryBuilder::from_tick_and_plan(&tick_event, &plan_event);
+        if let Some(build_start) = build_start {
+            summary.record_frame_build(&FrameBuildEvent {
+                frame_index: plan.frame_index,
+                build_start,
+            });
+        }
         summary
             .record_frame_drop(&drop_event)
             .record_scheduler_state(&state_event);
@@ -980,8 +1002,8 @@ impl FrameDriver {
 #[cfg(test)]
 mod tests {
     use crate::diagnostics::{
-        FramePlanEvent, FrameTickEvent, FrameTimingBasis, FrameTimingSummaryBuilder,
-        PresentFeedbackEvent, SchedulerStateEvent, SubmitEvent,
+        FrameBuildEvent, FramePlanEvent, FrameTickEvent, FrameTimingBasis,
+        FrameTimingSummaryBuilder, PresentFeedbackEvent, SchedulerStateEvent, SubmitEvent,
     };
     use crate::output::OutputId;
     use crate::scheduler::SchedulerState;
@@ -1359,6 +1381,10 @@ mod tests {
             expected_present: expected_feedback.expected_present,
         };
         let feedback_event = PresentFeedbackEvent::new(plan.frame_index, &expected_feedback);
+        let build_event = FrameBuildEvent {
+            frame_index: plan.frame_index,
+            build_start: frame.build_start(),
+        };
 
         let summary = driver
             .submit_frame(frame, submission)
@@ -1370,11 +1396,44 @@ mod tests {
         };
         let mut expected = FrameTimingSummaryBuilder::from_tick_and_plan(&tick_event, &plan_event);
         expected
+            .record_frame_build(&build_event)
             .record_submit(&submit_event)
             .record_present_feedback(&feedback_event)
             .record_scheduler_state(&state_event);
 
         assert_eq!(summary, expected.finish().expect("summary should finish"));
+    }
+
+    #[test]
+    fn summaries_say_when_a_frame_was_to_start_and_when_it_did() {
+        let mut held = driver();
+        held.request(FrameDemand::BACKGROUND);
+        let FrameBeginResult::Wait(FrameWait::NextTick) =
+            held.begin_frame(tick_started_opportunity(1_000)).result
+        else {
+            panic!("the cadence holds the frame for a later tick");
+        };
+        let FrameBeginResult::Ready(frame) =
+            held.begin_frame(tick_started_opportunity(1_100)).result
+        else {
+            panic!("the next tick releases the frame");
+        };
+        let summary = held.discard_frame(frame);
+        assert!(summary.starts_at_tick);
+        assert_eq!(summary.tick_time, HostTime(1_000));
+        assert_eq!(summary.build_start, Some(HostTime(1_100)));
+
+        let mut driver = driver();
+        driver.request(FrameDemand::ANIMATION);
+        assert!(matches!(
+            driver.begin_frame(opportunity(1_000, 0)).result,
+            FrameBeginResult::Wait(FrameWait::Until(_))
+        ));
+        let FrameBeginResult::Expired(expired) = driver.begin_pending_frame(HostTime(5_000)) else {
+            panic!("the host woke after the deadline");
+        };
+        assert!(!expired.starts_at_tick);
+        assert_eq!(expired.build_start, None, "it never started");
     }
 
     #[test]

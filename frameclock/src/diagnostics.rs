@@ -77,6 +77,9 @@ pub struct FramePlanEvent {
     pub frame_interval: Duration,
     /// Time applications should wake or start app-side frame work.
     pub frame_start: HostTime,
+    /// Whether the frame starts at the first tick from `frame_start` on;
+    /// see [`FramePlan::starts_at_tick`].
+    pub starts_at_tick: bool,
     /// Time applications should sample animations and simulation state for.
     pub sample_time: HostTime,
     /// Intended presentation time, if known.
@@ -105,6 +108,7 @@ impl FramePlanEvent {
             demand: plan.demand,
             frame_interval: plan.frame_interval,
             frame_start: plan.frame_start,
+            starts_at_tick: plan.starts_at_tick,
             sample_time: plan.sample_time,
             target_present: plan.target_present,
             presentation_timing: plan.presentation_timing,
@@ -114,6 +118,23 @@ impl FramePlanEvent {
             safety_margin_ticks,
         }
     }
+}
+
+/// Diagnostics event recorded when a planned frame is handed to the host to
+/// build: [`ActiveFrame::build_start`](crate::ActiveFrame::build_start).
+///
+/// [`FrameDriver`](crate::FrameDriver) records it for every frame it hands
+/// out. Low-level integrations create it when their frame work starts and
+/// pass it to a [`DiagnosticsSink`] or [`FrameTimingSummaryBuilder`].
+/// Compared with the plan's [`frame_start`](FramePlan::frame_start), it says
+/// how late the frame started.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameBuildEvent {
+    /// Monotonic content-frame counter.
+    pub frame_index: u64,
+    /// Host time when the frame's work started: the tick or wake that
+    /// released it.
+    pub build_start: HostTime,
 }
 
 /// Diagnostics event recorded when a frame is submitted to the display pipeline.
@@ -257,7 +278,11 @@ pub enum FrameTimingBasis {
 /// UIs that do not need a host-specific frame-loop trace. It intentionally does
 /// not include app/render phases, layer changes, damage rectangles, or other
 /// renderer-owned concepts.
+///
+/// Fields may be added in later releases, so build one with
+/// [`FrameTimingSummaryBuilder`].
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct FrameTimingSummary {
     /// Monotonic content-frame counter.
     pub frame_index: u64,
@@ -279,6 +304,13 @@ pub struct FrameTimingSummary {
     pub frame_interval: Duration,
     /// Time applications should wake or start app-side frame work.
     pub frame_start: HostTime,
+    /// Whether the frame starts at the first tick from `frame_start` on;
+    /// see [`FramePlan::starts_at_tick`].
+    pub starts_at_tick: bool,
+    /// Host time when the frame's work started, the tick or wake that
+    /// released it, if recorded. `None` for a frame that expired before it
+    /// was handed out.
+    pub build_start: Option<HostTime>,
     /// Time applications should sample animations and simulation state for.
     pub sample_time: HostTime,
     /// Intended presentation time, if known.
@@ -331,6 +363,7 @@ pub struct FrameTimingSummary {
 pub struct FrameTimingSummaryBuilder {
     tick: Option<FrameTickEvent>,
     plan: Option<FramePlanEvent>,
+    build: Option<FrameBuildEvent>,
     submit: Option<SubmitEvent>,
     feedback: Option<PresentFeedbackEvent>,
     drop: Option<FrameDropEvent>,
@@ -344,6 +377,7 @@ impl FrameTimingSummaryBuilder {
         Self {
             tick: None,
             plan: None,
+            build: None,
             submit: None,
             feedback: None,
             drop: None,
@@ -357,6 +391,7 @@ impl FrameTimingSummaryBuilder {
         Self {
             tick: Some(*tick),
             plan: Some(*plan),
+            build: None,
             submit: None,
             feedback: None,
             drop: None,
@@ -373,6 +408,12 @@ impl FrameTimingSummaryBuilder {
     /// Records a frame plan event.
     pub fn record_frame_plan(&mut self, event: &FramePlanEvent) -> &mut Self {
         self.plan = Some(*event);
+        self
+    }
+
+    /// Records a frame build event.
+    pub fn record_frame_build(&mut self, event: &FrameBuildEvent) -> &mut Self {
+        self.build = Some(*event);
         self
     }
 
@@ -422,6 +463,9 @@ impl FrameTimingSummaryBuilder {
             return None;
         }
 
+        let build = self
+            .build
+            .filter(|build| build.frame_index == plan.frame_index);
         let submit = self
             .submit
             .filter(|submit| submit.frame_index == plan.frame_index);
@@ -445,6 +489,8 @@ impl FrameTimingSummaryBuilder {
             demand: plan.demand,
             frame_interval: plan.frame_interval,
             frame_start: plan.frame_start,
+            starts_at_tick: plan.starts_at_tick,
+            build_start: build.map(|build| build.build_start),
             sample_time: plan.sample_time,
             target_present: plan.target_present,
             commit_deadline: plan.commit_deadline,
@@ -507,6 +553,11 @@ pub trait DiagnosticsSink {
         _ = event;
     }
 
+    /// Called when a planned frame's work starts.
+    fn on_frame_build(&mut self, event: &FrameBuildEvent) {
+        _ = event;
+    }
+
     /// Called when a frame is submitted.
     fn on_submit(&mut self, event: &SubmitEvent) {
         _ = event;
@@ -540,6 +591,10 @@ impl DiagnosticsSink for FrameTimingSummaryBuilder {
 
     fn on_frame_plan(&mut self, event: &FramePlanEvent) {
         self.record_frame_plan(event);
+    }
+
+    fn on_frame_build(&mut self, event: &FrameBuildEvent) {
+        self.record_frame_build(event);
     }
 
     fn on_submit(&mut self, event: &SubmitEvent) {
@@ -611,6 +666,13 @@ impl<'a> Diagnostics<'a> {
         }
     }
 
+    /// Emits a frame build event.
+    pub fn frame_build(&mut self, event: &FrameBuildEvent) {
+        if let Some(sink) = &mut self.sink {
+            sink.on_frame_build(event);
+        }
+    }
+
     /// Emits a submit event.
     pub fn submit(&mut self, event: &SubmitEvent) {
         if let Some(sink) = &mut self.sink {
@@ -668,6 +730,7 @@ mod tests {
             demand: FrameDemand::ANIMATION,
             frame_interval: Duration(16_666_667),
             frame_start: HostTime(1_500),
+            starts_at_tick: false,
             sample_time: HostTime(2_000),
             target_present: Some(HostTime(2_000)),
             presentation_timing: PresentationTiming::Predictive,
