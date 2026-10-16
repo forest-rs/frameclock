@@ -392,6 +392,11 @@ pub struct FramePlan {
     /// [start at a tick](PresentHints::starting_at_tick) start at the tick
     /// time, or half a refresh before the later tick that the selected
     /// cadence waits for.
+    ///
+    /// A frame on a [selected timeline](PresentHints::selected_timeline)
+    /// that waits for a later callback keeps this callback's target and
+    /// deadline until that callback releases it and binds its own, so while
+    /// it waits its start can be after its deadline.
     pub frame_start: HostTime,
     /// Whether the frame starts at the first tick from
     /// [`frame_start`](Self::frame_start) on, rather than when the host
@@ -475,6 +480,8 @@ pub struct PresentHints {
     starts_at_tick: bool,
     /// Whether [`Self::latest_commit`] is a limit the scheduler must keep.
     hard_deadline: bool,
+    /// Whether the target identifies a native timeline selected by the host.
+    selected_timeline: bool,
 }
 
 impl PresentHints {
@@ -501,6 +508,7 @@ impl PresentHints {
             latest_commit,
             starts_at_tick: false,
             hard_deadline: false,
+            selected_timeline: false,
         }
     }
 
@@ -556,11 +564,12 @@ impl PresentHints {
     /// can use it on hints a platform adapter marked
     /// [`starting_at_tick`](Self::starting_at_tick): frames then start as late
     /// as the commit deadline and its margins allow, so the input and state
-    /// they sample are fresher.
+    /// they sample are fresher. Selected native timelines retain callback-only
+    /// starts: a host wake cannot acquire a replacement timeline or drawable.
     #[inline]
     #[must_use]
     pub const fn starting_when_planned(mut self) -> Self {
-        self.starts_at_tick = false;
+        self.starts_at_tick = self.selected_timeline;
         self
     }
 
@@ -597,6 +606,42 @@ impl PresentHints {
     #[must_use]
     pub const fn has_hard_deadline(self) -> bool {
         self.hard_deadline
+    }
+
+    /// Creates hints for a selected native presentation timeline or drawable.
+    ///
+    /// `desired_present` belongs to that resource's native identity, such as
+    /// an Android vsync token. It cannot be shifted by learned latency or
+    /// pipeline lookahead while keeping the same identity. `latest_commit`
+    /// is a hard CPU submission limit; a host must reserve GPU readiness work
+    /// before supplying it when the native deadline includes that work.
+    ///
+    /// Frames start at callbacks. When cadence holds a frame for a later
+    /// callback, [`FrameDriver`](crate::FrameDriver) binds its ready plan to
+    /// the selected timeline of the callback that releases it, including its
+    /// target, deadline, tick, and output. A host wake cannot release such a
+    /// frame. Use the releasing callback's native resource to submit it.
+    ///
+    /// Low-level scheduler users must check the returned start and hard limit:
+    /// a future start can require skipping this resource and waiting for a
+    /// new native opportunity. The retained driver performs that lifecycle.
+    #[inline]
+    #[must_use]
+    pub const fn selected_timeline(desired_present: HostTime, latest_commit: HostTime) -> Self {
+        let mut hints = Self::predictive(desired_present, latest_commit)
+            .starting_at_tick()
+            .with_hard_deadline();
+        hints.selected_timeline = true;
+        hints
+    }
+
+    /// Returns whether the target identifies the current native resource.
+    ///
+    /// See [`Self::selected_timeline`].
+    #[inline]
+    #[must_use]
+    pub const fn has_selected_timeline(self) -> bool {
+        self.selected_timeline
     }
 
     /// Creates predictive present hints.
@@ -1386,5 +1431,13 @@ mod tests {
         let fb = PresentFeedback::from_hints(&hints, HostTime(900_000), HostTime(950_000), None);
         assert_eq!(fb.missed_deadline, None);
         assert_eq!(fb.pacing_overrun, Some(false));
+    }
+    #[test]
+    fn selected_timelines_retain_callback_lifecycle_and_hard_limits() {
+        let hints =
+            PresentHints::selected_timeline(HostTime(200), HostTime(180)).starting_when_planned();
+        assert!(hints.has_selected_timeline());
+        assert!(hints.starts_at_tick());
+        assert!(hints.has_hard_deadline());
     }
 }

@@ -664,7 +664,9 @@ impl Scheduler {
             build_cost,
         );
         // A hard deadline belongs to a resource that pipeline depth cannot
-        // give more time, so only the cadence moves it.
+        // give more time. Cadence can defer frame work, but a selected native
+        // timeline retains this resource's target and limit until the driver
+        // binds a later callback's resource.
         self.drain.interval = source_interval.ticks();
         // Holding a frame back a refresh drains a frame queued ahead of it.
         let held_back = if self.drain.pending && demand.dominant_class() != FrameDemandClass::Input
@@ -694,15 +696,23 @@ impl Scheduler {
         let scheduled_present = base_present
             .checked_add(schedule_delta)
             .unwrap_or(base_present);
-        let present_latency = self.present_latency_shift(source_interval);
+        let present_latency = if hints.has_selected_timeline() {
+            Duration::ZERO
+        } else {
+            self.present_latency_shift(source_interval)
+        };
         let base_commit_deadline = if hints.has_hard_deadline() {
             hints.latest_commit()
         } else {
             hints.latest_commit().max(tick.now)
         };
-        let commit_deadline = base_commit_deadline
-            .checked_add(schedule_delta)
-            .unwrap_or(base_commit_deadline);
+        let commit_deadline = if hints.has_selected_timeline() {
+            base_commit_deadline
+        } else {
+            base_commit_deadline
+                .checked_add(schedule_delta)
+                .unwrap_or(base_commit_deadline)
+        };
         if hints.has_hard_deadline() {
             // Depth cannot extend a hard deadline, so the frame would fit
             // one depth shallower too.
@@ -718,7 +728,11 @@ impl Scheduler {
                 let shown_at = scheduled_present
                     .checked_add(present_latency)
                     .unwrap_or(scheduled_present);
-                let target_present = platform_present.map(|_| shown_at);
+                let target_present = if hints.has_selected_timeline() {
+                    platform_present
+                } else {
+                    platform_present.map(|_| shown_at)
+                };
                 let sample_time = target_present.unwrap_or(shown_at);
                 (target_present, sample_time)
             }
@@ -1998,6 +2012,30 @@ mod tests {
         }
         drain_plan(&mut sched);
         assert_eq!(sched.state().queue_drains, 2);
+    }
+
+    #[test]
+    fn a_drained_native_frame_waits_for_the_next_callback() {
+        let mut sched = drain_scheduler();
+        drain_plan(&mut sched);
+        for _ in 0..3 {
+            shown(&mut sched, 0, 0);
+        }
+        for _ in 0..30 {
+            shown(&mut sched, 1, 0);
+        }
+        // A selected native timeline's frame held back to drain the queue
+        // starts at a later callback, whose resource the driver binds; its
+        // plan keeps this callback's target and limit until then.
+        let mut opportunity =
+            make_opportunity(PresentationTiming::Predictive, 1_000, Some(2_000), 1_800);
+        opportunity.hints = PresentHints::selected_timeline(HostTime(2_000), HostTime(1_800));
+        let plan = sched.plan(opportunity, FrameDemand::ANIMATION, 0);
+        assert_eq!(sched.state().queue_drains, 1);
+        assert!(plan.frame_start > HostTime(1_000), "{:?}", plan.frame_start);
+        assert!(plan.starts_at_tick);
+        assert_eq!(plan.target_present, Some(HostTime(2_000)));
+        assert_eq!(plan.commit_deadline, HostTime(1_800));
     }
 
     #[test]
