@@ -1,0 +1,21 @@
+[package]
+name = "platform_timing_probe"
+description = "Vulkan and Android frameclock API integration probe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+frameclock.workspace = true
+frameclock_vulkan = { path = "../../frameclock_vulkan" }
+frameclock_android = { path = "../../frameclock_android" }
+ash = { version = "0.38", default-features = false }
+
+[target.'cfg(target_os = "android")'.dependencies]
+ndk-sys = "0.6"

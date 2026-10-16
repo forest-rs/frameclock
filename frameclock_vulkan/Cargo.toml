@@ -1,0 +1,15 @@
+[package]
+name = "frameclock_vulkan"
+description = "Experimental Vulkan presentation timing adaptation for frameclock"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+frameclock.workspace = true

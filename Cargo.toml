@@ -9,6 +9,9 @@ members = [
   "frameclock_windows",
   "frameclock_x11",
   "frameclock_footfall",
+  "frameclock_vulkan",
+  "frameclock_android",
+  "examples/platform_timing_probe",
   "examples/frameclock_simulated",
   "examples/winit_paced_redraw",
 ]
