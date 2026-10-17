@@ -155,6 +155,7 @@ fn summary(frame_index: u64) -> FrameTimingSummary {
             commit_deadline: HostTime(3_250),
             pipeline_depth: 2,
             present_latency: Duration(60),
+            held_back: Duration::ZERO,
             safety_margin_ticks: 300,
         },
     );
@@ -179,6 +180,7 @@ fn summary(frame_index: u64) -> FrameTimingSummary {
                 recent_misses: 1,
                 consecutive_hits: 0,
                 wake_lateness_ticks: 0,
+                queue_drains: 0,
             },
         });
     let summary = summary
@@ -295,6 +297,26 @@ fn the_plan_records_its_latency_without_a_scheduler_state_sample() {
             ("present_latency_ns", LabelValue::Unsigned(2_500)),
         ])),
         "the latency comes from the plan, not the state sampled after feedback"
+    );
+}
+
+#[test]
+fn a_frame_held_back_to_drain_the_queue_says_so() {
+    let (backend, _serial) = recording();
+    let mut held = summary(8);
+    held.held_back = Duration(3_000);
+    Recorder::new(MACH).record(&held);
+
+    let sampled = taken(backend)
+        .into_iter()
+        .skip_while(|seen| !matches!(seen, Seen::Point(_, FramePointKind::Sampled, ..)))
+        .nth(1);
+    assert_eq!(
+        sampled,
+        Some(Seen::Args(vec![(
+            "held_back_ns",
+            LabelValue::Unsigned(125_000)
+        )])),
     );
 }
 
