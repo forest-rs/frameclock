@@ -22,6 +22,7 @@ env:
     -p mediaclock
   # List of packages that don't support `no_std`.
   RUST_STD_ONLY_PKGS: >-
+    --exclude platform_timing_probe
     --exclude frameclock_x11
     --exclude frameclock_apple
     --exclude frameclock_simulated
@@ -348,6 +349,22 @@ jobs:
         run: |
           rustup target add ${{ env.RUST_IOS_TARGET }}
           cargo hack check -p frameclock_apple --locked --optional-deps --each-feature --target ${{ env.RUST_IOS_TARGET }}
+
+  check-platform-timing:
+    name: platform timing API probes (msrv)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_MIN_VER }}
+          targets: aarch64-linux-android,x86_64-unknown-none
+      - name: check portable adapters without std
+        run: cargo check -p frameclock_vulkan -p frameclock_android --locked --target x86_64-unknown-none
+      - name: check real Android callback accessors
+        run: cargo check -p platform_timing_probe --locked --target aarch64-linux-android
+      - name: run synthetic native timing round trip
+        run: cargo run -p platform_timing_probe --locked
 
   check-msrv-wasm:
     name: cargo check (msrv) (wasm32)

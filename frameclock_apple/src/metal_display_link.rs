@@ -9,7 +9,6 @@ use core::fmt;
 use core::marker::PhantomData;
 
 use frameclock::time::Timebase;
-use frameclock::timing::PresentationTiming;
 use frameclock::{
     DisplayTiming, Duration, FrameOpportunity, FrameTick, HostTime, OutputId, PresentHints,
 };
@@ -263,9 +262,7 @@ fn update_hints(
 ) -> PresentHints {
     match (tick.predicted_present, commit_deadline) {
         (Some(present), Some(deadline)) if present >= tick.now => {
-            PresentHints::new(PresentationTiming::Predictive, Some(present), deadline)
-                .starting_at_tick()
-                .with_hard_deadline()
+            PresentHints::selected_timeline(present, deadline)
         }
         (_, Some(deadline)) => PresentHints::pacing_only(deadline)
             .starting_at_tick()
@@ -471,6 +468,7 @@ impl Drop for CaMetalDisplayLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frameclock::timing::PresentationTiming;
 
     const TB: Timebase = Timebase::NANOS;
 
