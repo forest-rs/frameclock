@@ -1896,6 +1896,50 @@ mod tests {
         });
     }
 
+    /// Learns two refreshes of present latency, then lets the pipeline
+    /// recover, with a present that holds each frame until the time it is
+    /// asked for: returns the latency learned by the end.
+    fn latency_after_recovery(ask: fn(&FramePlan) -> HostTime) -> u64 {
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
+        config.degradation_policy = DegradationPolicy::Fixed;
+        config.present_latency_alpha = 0.5;
+        config.queue_drain_after = 0;
+        let mut sched = Scheduler::new(config);
+        let late = 2 * REFRESH_INTERVAL.ticks();
+        for frame in 0..60_u64 {
+            let plan = sched.plan(
+                make_opportunity(PresentationTiming::Predictive, 1_000, Some(2_000), 1_800),
+                FrameDemand::ANIMATION,
+                frame,
+            );
+            // The pipeline holds frames two refreshes at first, then not at
+            // all; the present also waits for the time it was asked for.
+            let held = if frame < 20 { late } else { 0 };
+            let shown = HostTime(2_000 + held).max(ask(&plan));
+            sched.observe(&PresentFeedback::new(
+                &plan,
+                HostTime(1_000),
+                HostTime(1_500),
+                Some(shown),
+            ));
+        }
+        sched.present_latency_ticks()
+    }
+
+    #[test]
+    fn asking_for_the_target_keeps_learned_latency_forever() {
+        let target = |plan: &FramePlan| plan.target_present.unwrap();
+        assert!(
+            latency_after_recovery(target) >= REFRESH_INTERVAL.ticks(),
+            "the frames came true to the latency they were planned with"
+        );
+        let requested = |plan: &FramePlan| plan.requested_present().unwrap();
+        assert!(
+            latency_after_recovery(requested) < REFRESH_INTERVAL.ticks() / 2,
+            "asked for without it, frames show the pipeline recovered"
+        );
+    }
+
     #[test]
     fn frames_kept_a_refresh_late_drain_once() {
         let mut sched = drain_scheduler();

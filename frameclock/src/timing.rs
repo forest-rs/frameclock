@@ -428,6 +428,24 @@ pub struct FramePlan {
     pub frame_index: u64,
 }
 
+impl FramePlan {
+    /// Returns the time to give a present that takes one, such as
+    /// `VK_GOOGLE_display_timing`'s `desiredPresentTime`: the earliest the
+    /// frame may be shown, which is its target without the learned
+    /// [`present_latency`](Self::present_latency).
+    ///
+    /// The target is when the frame is expected to be seen, for sampling. A
+    /// present told not to show the frame before then holds it until then,
+    /// so the latency it was planned with comes true: it can never be seen
+    /// sooner, and the scheduler can never learn that it could be. Ask for
+    /// this time instead, and let the pipeline add what it adds.
+    #[must_use]
+    pub fn requested_present(&self) -> Option<HostTime> {
+        let target = self.target_present?;
+        Some(target.checked_sub(self.present_latency).unwrap_or(target))
+    }
+}
+
 /// Backend submission constraints carried by a [`FrameOpportunity`].
 ///
 /// Backends compute these from the current [`FrameTick`] and their own
