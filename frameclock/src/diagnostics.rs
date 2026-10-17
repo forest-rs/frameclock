@@ -18,7 +18,9 @@
 use crate::output::OutputId;
 use crate::scheduler::SchedulerState;
 use crate::time::{Duration, HostTime};
-use crate::timing::{FrameDemand, FramePlan, FrameTick, PresentFeedback, PresentationTiming};
+use crate::timing::{
+    BufferWait, FrameDemand, FramePlan, FrameTick, PresentFeedback, PresentationTiming,
+};
 
 /// Diagnostics event created from a [`FrameTick`] when a frame opportunity arrives.
 ///
@@ -155,6 +157,9 @@ pub struct SubmitEvent {
     pub submitted_at: HostTime,
     /// Expected presentation time at submission, if known.
     pub expected_present: Option<HostTime>,
+    /// How long the frame waited for a buffer to render into, if the host
+    /// measured it.
+    pub buffer_wait: Option<BufferWait>,
 }
 
 /// Diagnostics event created from resolved [`PresentFeedback`].
@@ -323,6 +328,9 @@ pub struct FrameTimingSummary {
     pub commit_deadline: HostTime,
     /// Host time when the frame was submitted, if recorded.
     pub submitted_at: Option<HostTime>,
+    /// How long the frame waited for a buffer to render into, if the host
+    /// measured it; see [`BufferWait`].
+    pub buffer_wait: Option<BufferWait>,
     /// What the frame's submission cost beyond the host's own work, if
     /// the platform reported it.
     pub work: Option<Duration>,
@@ -502,6 +510,7 @@ impl FrameTimingSummaryBuilder {
             target_present: plan.target_present,
             commit_deadline: plan.commit_deadline,
             submitted_at: submit.map(|submit| submit.submitted_at),
+            buffer_wait: submit.and_then(|submit| submit.buffer_wait),
             work: feedback.and_then(|feedback| feedback.work),
             expected_present: submit.and_then(|submit| submit.expected_present),
             actual_present: feedback.and_then(|feedback| feedback.actual_present),
@@ -787,6 +796,7 @@ mod tests {
             frame_index: 7,
             submitted_at: HostTime(1_850),
             expected_present: Some(HostTime(2_000)),
+            buffer_wait: None,
         };
         let feedback = PresentFeedbackEvent {
             frame_index: 7,
@@ -838,6 +848,7 @@ mod tests {
             frame_index: 8,
             submitted_at: HostTime(1_850),
             expected_present: Some(HostTime(2_000)),
+            buffer_wait: None,
         };
         let mismatched_feedback = PresentFeedbackEvent {
             frame_index: 9,
@@ -900,6 +911,7 @@ mod tests {
             frame_index: 7,
             submitted_at: HostTime(1_850),
             expected_present: Some(HostTime(2_000)),
+            buffer_wait: None,
         };
 
         let mut builder = FrameTimingSummaryBuilder::from_tick_and_plan(&tick, &plan);
@@ -923,6 +935,7 @@ mod tests {
             frame_index: 7,
             submitted_at: HostTime(1_850),
             expected_present: None,
+            buffer_wait: None,
         };
 
         let mut builder = FrameTimingSummaryBuilder::from_tick_and_plan(&tick, &plan);
@@ -947,6 +960,7 @@ mod tests {
             frame_index: 7,
             submitted_at: HostTime(1_850),
             expected_present: None,
+            buffer_wait: None,
         };
 
         let mut builder = FrameTimingSummaryBuilder::from_tick_and_plan(&tick, &plan);

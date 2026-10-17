@@ -136,6 +136,7 @@ fn main() {
                 frame_index,
                 submitted_at,
                 expected_present: feedback.expected_present,
+                buffer_wait: None,
             };
             summary.record_submit(&submit_event);
             diagnostics.submit(&submit_event);

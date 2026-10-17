@@ -165,4 +165,4 @@ pub use driver::{
 pub use output::OutputId;
 pub use scheduler::SchedulerConfig;
 pub use time::{Duration, HostTime};
-pub use timing::{DisplayTiming, FrameOpportunity, FrameTick, PresentHints};
+pub use timing::{BufferWait, DisplayTiming, FrameOpportunity, FrameTick, PresentHints};
