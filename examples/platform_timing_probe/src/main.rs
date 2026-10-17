@@ -14,7 +14,7 @@ use frameclock::{
     DisplayTiming, Duration, FrameBeginResult, FrameDemand, FrameDriver, FrameSubmission, HostTime,
     OutputId,
 };
-use frameclock_android::{FrameBudget, FrameTimeline, FrameTimelines};
+use frameclock_android::{FrameBudget, FrameTimeline, FrameTimelines, LearnedBudget};
 use frameclock_vulkan::{
     Clock, ClockCorrelation, PresentId, PresentKey, PresentTracker, SwapchainId, TimeDomain,
 };
@@ -27,6 +27,11 @@ fn main() {
     let _decoder = android_bindings::copy_callback;
 
     let timelines = [FrameTimeline::new(101, 16_000_000, 12_000_000).unwrap()];
+    // The budget is learned from each frame; this is its starting guess.
+    let mut budget = LearnedBudget::new(FrameBudget {
+        build: Duration(1_000_000),
+        ready_lead: Duration(2_000_000),
+    });
     let selected = FrameTimelines {
         frame_time: HostTime(0),
         preferred_index: 0,
@@ -34,10 +39,7 @@ fn main() {
     }
     .select(
         HostTime(1_000_000),
-        FrameBudget {
-            build: Duration(1_000_000),
-            ready_lead: Duration(2_000_000),
-        },
+        budget.budget(),
         Some(Duration(8_000_000)),
         DisplayTiming::fixed(Duration(8_000_000)),
         OutputId(0),
@@ -82,7 +84,10 @@ fn main() {
     let requests = [request];
     let _present_chain = vk::PresentTimesInfoGOOGLE::default().times(&requests);
     let frame_index = frame.plan().frame_index;
+    let build_start = frame.build_start();
     let _ = driver.submit_frame(frame, FrameSubmission::reported(HostTime(2_000_000)));
+    // Its GPU work finished 1.5 ms after submission: learn from it.
+    budget.observe(build_start, HostTime(2_000_000), HostTime(3_500_000));
     let key = PresentKey {
         swapchain: domain.swapchain,
         id: PresentId::Google(request.present_id),
@@ -117,6 +122,7 @@ fn main() {
         Some(native.expected_present),
         "planning must retain the chosen native target"
     );
+    println!("next budget: {:?}", budget.budget());
     println!(
         "native vsync {}, frame {}, Vulkan present {}: expected {:?}, shown {:?}, CPU deadline {:?}",
         native.vsync_id,
