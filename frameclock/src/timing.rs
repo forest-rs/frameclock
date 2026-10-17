@@ -428,6 +428,28 @@ pub struct FramePlan {
     pub frame_index: u64,
 }
 
+/// How long a frame waited for a buffer to render into, such as in
+/// `nextDrawable`, `dequeueBuffer`, or `vkAcquireNextImageKHR`.
+///
+/// A frame blocks there when frames queued ahead hold every buffer: the
+/// presentation pipeline is full, so the program is ahead, not slow. The
+/// scheduler leaves the wait out of the frame's build cost.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BufferWait {
+    /// When the frame asked for a buffer.
+    pub requested: HostTime,
+    /// When it got one.
+    pub acquired: HostTime,
+}
+
+impl BufferWait {
+    /// Returns how long the frame waited.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        self.acquired.saturating_duration_since(self.requested)
+    }
+}
+
 /// Backend submission constraints carried by a [`FrameOpportunity`].
 ///
 /// Backends compute these from the current [`FrameTick`] and their own
@@ -698,6 +720,11 @@ pub struct PresentFeedback {
     /// so that frames already in flight when the depth changed do not
     /// count for or against the new one.
     pub pipeline_depth: Option<u8>,
+    /// How long the frame waited for a buffer to render into: time between
+    /// [`build_start`](Self::build_start) and
+    /// [`submitted_at`](Self::submitted_at) that was not its own work; see
+    /// [`BufferWait`].
+    pub buffer_wait: Duration,
     /// What producing this frame cost beyond the host's own work, if the
     /// platform can say: a renderer that submits GPU work and returns
     /// reports how long that work took.
@@ -775,13 +802,15 @@ impl PresentFeedback {
         feedback
     }
 
-    /// What this frame cost to produce: the longer of the host's own span
-    /// and the [`work`](Self::work) its submission queued.
+    /// What this frame cost to produce: the longer of the host's own span,
+    /// less the time it [waited for a buffer](Self::buffer_wait), and the
+    /// [`work`](Self::work) its submission queued.
     #[must_use]
     pub fn build_cost(&self) -> Duration {
         let host = self
             .submitted_at
-            .saturating_duration_since(self.build_start);
+            .saturating_duration_since(self.build_start)
+            .saturating_sub(self.buffer_wait);
         match self.work {
             Some(work) if work > host => work,
             _ => host,
@@ -848,6 +877,7 @@ impl PresentFeedback {
             build_start,
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: Duration::ZERO,
             work: None,
             expected_present,
             actual_present,

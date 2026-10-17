@@ -163,6 +163,7 @@ fn summary(frame_index: u64) -> FrameTimingSummary {
             frame_index,
             submitted_at: HostTime(2_900),
             expected_present: Some(HostTime(4_100)),
+            buffer_wait: None,
         })
         .record_present_feedback(&PresentFeedbackEvent {
             frame_index,
