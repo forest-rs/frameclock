@@ -694,6 +694,10 @@ pub struct PresentFeedback {
     /// The presentation latency the plan was made with, carried back so
     /// the scheduler can correct it.
     pub present_latency: Duration,
+    /// The pipeline depth the frame was planned at, if known, carried back
+    /// so that frames already in flight when the depth changed do not
+    /// count for or against the new one.
+    pub pipeline_depth: Option<u8>,
     /// What producing this frame cost beyond the host's own work, if the
     /// platform can say: a renderer that submits GPU work and returns
     /// reports how long that work took.
@@ -744,6 +748,7 @@ impl PresentFeedback {
             actual_present,
         );
         feedback.present_latency = plan.present_latency;
+        feedback.pipeline_depth = Some(plan.pipeline_depth);
         // A frame shown at the refresh it was planned for is on time, even
         // though the timestamp for that refresh lands a little after the
         // target: only the next refresh is a real miss. Platforms that
@@ -842,6 +847,7 @@ impl PresentFeedback {
             commit_deadline: hints.latest_commit(),
             build_start,
             present_latency: Duration::ZERO,
+            pipeline_depth: None,
             work: None,
             expected_present,
             actual_present,

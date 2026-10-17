@@ -791,7 +791,7 @@ mod tests {
                 present_latency_ticks: 0,
                 pipeline_depth: 1,
                 safety_margin_ticks: 600,
-                consecutive_misses: 1,
+                recent_misses: 1,
                 consecutive_hits: 0,
                 wake_lateness_ticks: 0,
             },

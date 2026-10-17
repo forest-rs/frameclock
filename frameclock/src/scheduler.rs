@@ -22,13 +22,23 @@ use crate::timing::{
 pub enum DegradationPolicy {
     /// Adapt pipeline depth automatically.
     ///
-    /// Increases depth by 1 after `miss_threshold` consecutive misses.
-    /// Decreases depth by 1 after `recovery_threshold` consecutive hits.
-    /// Bounded by [`SchedulerConfig::min_depth`] and
-    /// [`SchedulerConfig::max_depth`].
+    /// Increases depth by 1 when `miss_threshold` of the last `miss_window`
+    /// frames missed, so misses that come every other frame count as surely
+    /// as misses in a row. Decreases depth by 1 after `recovery_threshold`
+    /// consecutive hits, and only while each frame planned meanwhile would
+    /// also have had time for its work one depth shallower. Bounded by
+    /// [`SchedulerConfig::min_depth`] and [`SchedulerConfig::max_depth`].
+    ///
+    /// Only frames planned at the current depth count: frames already in
+    /// flight when it changed say nothing about the new depth. Pacing
+    /// overruns, the weaker signal, take twice `miss_threshold`.
     Adaptive {
-        /// Number of consecutive misses before increasing depth.
+        /// How many misses among the last `miss_window` frames increase
+        /// depth.
         miss_threshold: u32,
+        /// How many of the most recent frames misses are counted over, at
+        /// most 64.
+        miss_window: u32,
         /// Number of consecutive hits before decreasing depth.
         recovery_threshold: u32,
     },
@@ -70,6 +80,16 @@ pub struct SchedulerConfig {
     pub nominal_latency: Duration,
     /// Policy for adapting pipeline depth.
     pub degradation_policy: DegradationPolicy,
+    /// How long animation and background frames keep a slower cadence
+    /// before the scheduler speeds them back up, in host ticks.
+    ///
+    /// The cadence moves only when the learned build cost is more than a
+    /// sixteenth of a refresh past a boundary: it slows down as soon as the
+    /// work needs a longer interval by that much, and speeds up once the
+    /// work fits the faster one with that much to spare and the slower one
+    /// has been held this long. A build cost near a boundary would otherwise
+    /// switch the cadence back and forth, and each switch is itself a hitch.
+    pub cadence_hold: Duration,
     /// EMA smoothing factor for how late frames are actually shown
     /// (0.0-1.0); `0.0` turns the compensation off.
     ///
@@ -101,6 +121,23 @@ const DEFAULT_FRAME_START_MARGIN_NANOS: u64 = 1_000_000;
 
 /// The default pacing-only [`SchedulerConfig::nominal_latency`]: 16 ms.
 const DEFAULT_PACING_LATENCY_NANOS: u64 = 16_000_000;
+
+/// The default [`SchedulerConfig::cadence_hold`]: half a second.
+const DEFAULT_CADENCE_HOLD_NANOS: u64 = 500_000_000;
+
+/// The default [`SchedulerConfig::degradation_policy`]: deeper after 3
+/// misses in 30 frames, about one in ten, and shallower after 60 hits in a
+/// row, about a second at 60 Hz. A deeper pipeline costs latency, but the
+/// misses that made it deeper cost visible hitches, so it comes back more
+/// slowly than it went.
+const DEFAULT_DEGRADATION_POLICY: DegradationPolicy = DegradationPolicy::Adaptive {
+    miss_threshold: 3,
+    miss_window: 30,
+    recovery_threshold: 60,
+};
+
+/// The most frames [`DegradationPolicy::Adaptive`] counts misses over.
+const MAX_MISS_WINDOW: u32 = 64;
 
 /// The start of a frame that may only start at a tick.
 ///
@@ -145,10 +182,8 @@ impl SchedulerConfig {
                 timebase,
             ),
             nominal_latency: Duration(0),
-            degradation_policy: DegradationPolicy::Adaptive {
-                miss_threshold: 3,
-                recovery_threshold: 10,
-            },
+            degradation_policy: DEFAULT_DEGRADATION_POLICY,
+            cadence_hold: Duration::from_nanos(DEFAULT_CADENCE_HOLD_NANOS, timebase),
             present_latency_alpha: 0.1,
             timebase,
         }
@@ -172,10 +207,8 @@ impl SchedulerConfig {
                 timebase,
             ),
             nominal_latency: Duration(0),
-            degradation_policy: DegradationPolicy::Adaptive {
-                miss_threshold: 3,
-                recovery_threshold: 10,
-            },
+            degradation_policy: DEFAULT_DEGRADATION_POLICY,
+            cadence_hold: Duration::from_nanos(DEFAULT_CADENCE_HOLD_NANOS, timebase),
             present_latency_alpha: 0.1,
             timebase,
         }
@@ -199,10 +232,8 @@ impl SchedulerConfig {
                 timebase,
             ),
             nominal_latency: Duration::from_nanos(DEFAULT_PACING_LATENCY_NANOS, timebase),
-            degradation_policy: DegradationPolicy::Adaptive {
-                miss_threshold: 3,
-                recovery_threshold: 10,
-            },
+            degradation_policy: DEFAULT_DEGRADATION_POLICY,
+            cadence_hold: Duration::from_nanos(DEFAULT_CADENCE_HOLD_NANOS, timebase),
             // Without an actual-present timestamp there is nothing to
             // learn how late a frame was.
             present_latency_alpha: 0.0,
@@ -221,8 +252,10 @@ pub struct SchedulerState {
     pub present_latency_ticks: u64,
     /// Current estimated safety margin in host-time ticks.
     pub safety_margin_ticks: u64,
-    /// Consecutive strong misses or pacing overruns currently accumulated.
-    pub consecutive_misses: u32,
+    /// Misses and pacing overruns among the frames counted toward
+    /// [`DegradationPolicy::Adaptive`]'s `miss_window`: the most recent
+    /// frames planned at the current depth.
+    pub recent_misses: u32,
     /// Consecutive strong hits currently accumulated.
     pub consecutive_hits: u32,
     /// How much earlier than its margins a queued frame now starts, in
@@ -234,6 +267,65 @@ pub struct SchedulerState {
 /// The most refresh intervals [`SchedulerConfig::present_latency_alpha`]
 /// will plan ahead for, however late frames are shown.
 const MAX_LATENCY_INTERVALS: u64 = 8;
+
+/// Which of the most recent frames missed: bit 0 is the latest.
+#[derive(Clone, Copy, Debug, Default)]
+struct MissWindow {
+    missed: u64,
+}
+
+impl MissWindow {
+    fn push(&mut self, missed: bool, window: u32) {
+        let mask = if window >= u64::BITS {
+            u64::MAX
+        } else {
+            (1_u64 << window) - 1
+        };
+        self.missed = ((self.missed << 1) | u64::from(missed)) & mask;
+    }
+
+    const fn misses(self) -> u32 {
+        self.missed.count_ones()
+    }
+}
+
+/// The cadence animation and background frames hold to; see
+/// [`SchedulerConfig::cadence_hold`].
+#[derive(Clone, Copy, Debug)]
+struct HeldCadence {
+    class: FrameDemandClass,
+    /// The fastest interval on offer when it was chosen.
+    fastest: Duration,
+    interval: Duration,
+    /// When it slowed down to this cadence, or `None` for a cadence chosen
+    /// afresh or sped up to, which nothing holds.
+    slowed_at: Option<HostTime>,
+}
+
+impl HeldCadence {
+    /// The held interval at the fastest interval now on offer, or `None`
+    /// when the display's rate has changed and the cadence starts afresh.
+    ///
+    /// A fixed display's measured interval wanders by a few ticks, and a
+    /// cadence held at some refreshes stays at that many.
+    fn at(self, fastest: Duration, display: DisplayTiming) -> Option<Duration> {
+        let drift = fastest.ticks().abs_diff(self.fastest.ticks());
+        if self.fastest.is_zero() || drift > fastest.ticks() / 8 {
+            return None;
+        }
+        let scaled = u128::from(self.interval.ticks()) * u128::from(fastest.ticks())
+            / u128::from(self.fastest.ticks());
+        let scaled = Duration(u64::try_from(scaled).unwrap_or(u64::MAX));
+        // Scaling rounds down, so step back a tick before rounding up to the
+        // display's grid: a multiple of the old interval lands on the same
+        // multiple of the new one.
+        Some(
+            display
+                .choose_interval(scaled.saturating_sub(Duration(1)))
+                .max(fastest),
+        )
+    }
+}
 
 /// Exponential moving average tracker.
 #[derive(Clone, Copy, Debug)]
@@ -332,13 +424,21 @@ fn f64_ticks_to_u64(ticks: f64) -> u64 {
 ///
 /// With [`DegradationPolicy::Adaptive`] (set via
 /// [`SchedulerConfig::degradation_policy`]), the scheduler increases depth
-/// after consecutive deadline misses (trading latency for safety) and
-/// decreases depth after sustained hits (reclaiming latency). The
-/// EMA-smoothed build cost feeds into a safety margin (build cost ×
-/// multiplier) that backends can query via
-/// [`Scheduler::safety_margin_ticks()`]. The [`FramePlan::frame_start`] field
-/// applies that margin directly so hosts can schedule a redraw wake without
-/// duplicating scheduler policy.
+/// when too many recent frames miss their deadlines (trading latency for
+/// safety) and decreases it after sustained hits, once the work would also
+/// fit one depth shallower (reclaiming latency). The EMA-smoothed build cost
+/// feeds into a safety margin (build cost × multiplier) that backends can
+/// query via [`Scheduler::safety_margin_ticks()`]. The
+/// [`FramePlan::frame_start`] field applies that margin directly so hosts can
+/// schedule a redraw wake without duplicating scheduler policy.
+///
+/// # Cadence
+///
+/// Animation and background frames run at the fastest interval their build
+/// cost fits. The cadence changes only when the cost is clearly past a
+/// boundary, and holds a slower one for at least
+/// [`SchedulerConfig::cadence_hold`]. Input frames run at the display's
+/// fastest interval.
 ///
 /// # Usage
 ///
@@ -359,8 +459,12 @@ pub struct Scheduler {
     /// How late the host wakes for a frame's start.
     wake_lateness_ema: Ema,
     wake_lateness_ticks: u64,
-    consecutive_misses: u32,
+    misses: MissWindow,
     consecutive_hits: u32,
+    /// Consecutive plans whose work would also have had time one depth
+    /// shallower.
+    shallower_fits: u32,
+    cadence: Option<HeldCadence>,
 }
 
 impl Scheduler {
@@ -377,6 +481,15 @@ impl Scheduler {
             .clamp(config.min_depth, config.max_depth);
         config.ema_alpha = sanitize_ema_alpha(config.ema_alpha);
         config.safety_multiplier = sanitize_safety_multiplier(config.safety_multiplier);
+        if let DegradationPolicy::Adaptive {
+            miss_threshold,
+            miss_window,
+            ..
+        } = &mut config.degradation_policy
+        {
+            *miss_window = (*miss_window).clamp(1, MAX_MISS_WINDOW);
+            *miss_threshold = (*miss_threshold).clamp(1, *miss_window);
+        }
 
         Self {
             pipeline_depth: config.initial_depth,
@@ -386,8 +499,10 @@ impl Scheduler {
             safety_margin_ticks: 0,
             wake_lateness_ema: Ema::new(config.ema_alpha),
             wake_lateness_ticks: 0,
-            consecutive_misses: 0,
+            misses: MissWindow::default(),
             consecutive_hits: 0,
+            shallower_fits: 0,
+            cadence: None,
             config,
         }
     }
@@ -428,6 +543,7 @@ impl Scheduler {
         let source_interval = self.source_interval(opportunity);
         let build_cost = self.build_cost_estimate();
         let frame_interval = self.frame_interval(
+            tick.now,
             demand,
             opportunity.display_timing,
             source_interval,
@@ -462,6 +578,9 @@ impl Scheduler {
         let commit_deadline = base_commit_deadline
             .checked_add(schedule_delta)
             .unwrap_or(base_commit_deadline);
+        if !hints.has_hard_deadline() {
+            self.note_shallower_fit(tick.now, commit_deadline, demand, frame_interval);
+        }
 
         let (target_present, sample_time) = match presentation_timing {
             PresentationTiming::Predictive | PresentationTiming::Estimated => {
@@ -553,8 +672,34 @@ impl Scheduler {
             })
     }
 
+    /// Notes whether a plan's work would also have had time one depth
+    /// shallower: whether it could still have started at its tick with its
+    /// deadline a frame interval sooner.
+    fn note_shallower_fit(
+        &mut self,
+        now: HostTime,
+        commit_deadline: HostTime,
+        demand: FrameDemand,
+        frame_interval: Duration,
+    ) {
+        if self.pipeline_depth <= self.config.min_depth
+            || self.depth_lookahead_delta(demand, frame_interval).is_zero()
+        {
+            return;
+        }
+        let fits = commit_deadline
+            .checked_sub(frame_interval.saturating_add(self.frame_start_margin()))
+            .is_some_and(|start| start >= now);
+        self.shallower_fits = if fits {
+            self.shallower_fits.saturating_add(1)
+        } else {
+            0
+        };
+    }
+
     fn frame_interval(
-        &self,
+        &mut self,
+        now: HostTime,
         demand: FrameDemand,
         display: DisplayTiming,
         source_interval: Duration,
@@ -580,7 +725,51 @@ impl Scheduler {
                 .max(fastest.saturating_mul(2)),
         };
 
-        display.choose_interval(needed).max(fastest)
+        let wanted = display.choose_interval(needed).max(fastest);
+        let held = self
+            .cadence
+            .filter(|held| held.class == policy)
+            .and_then(|held| Some((held, held.at(fastest, display)?)));
+        let Some((held, interval)) = held else {
+            self.hold_cadence(policy, fastest, wanted, None);
+            return wanted;
+        };
+        // A sixteenth of a refresh either way of the boundary keeps the
+        // cadence: build cost that wanders across it does not move it.
+        let band = fastest.div_u64(16);
+        let slower = display
+            .choose_interval(needed.saturating_sub(band))
+            .max(fastest);
+        if slower > interval {
+            self.hold_cadence(policy, fastest, slower, Some(now));
+            return slower;
+        }
+        let faster = display
+            .choose_interval(needed.saturating_add(band))
+            .max(fastest);
+        let held_long_enough = held.slowed_at.is_none_or(|slowed_at| {
+            now.saturating_duration_since(slowed_at) >= self.config.cadence_hold
+        });
+        if faster < interval && held_long_enough {
+            self.hold_cadence(policy, fastest, faster, None);
+            return faster;
+        }
+        interval
+    }
+
+    fn hold_cadence(
+        &mut self,
+        class: FrameDemandClass,
+        fastest: Duration,
+        interval: Duration,
+        slowed_at: Option<HostTime>,
+    ) {
+        self.cadence = Some(HeldCadence {
+            class,
+            fastest,
+            interval,
+            slowed_at,
+        });
     }
 
     fn frame_start(
@@ -678,66 +867,73 @@ impl Scheduler {
             self.present_latency_ticks = f64_ticks_to_u64(self.present_latency_ema.get());
         }
 
-        // Adapt pipeline depth according to degradation policy.
-        //
-        // `missed_deadline` is the strong signal: the backend believes it can
-        // classify the frame as a real hit or miss.
-        // `pacing_overrun` is weaker: it only says we ran past a pacing
-        // boundary. We still use it, but more conservatively, so pacing-only
-        // backends can apply pressure without pretending they know actual
-        // presentation truth.
-        match self.config.degradation_policy {
-            DegradationPolicy::Adaptive {
-                miss_threshold,
-                recovery_threshold,
-            } => match feedback.missed_deadline {
-                Some(true) => {
-                    // Real miss: react using the normal threshold.
-                    self.consecutive_misses += 1;
-                    self.consecutive_hits = 0;
-                    if self.consecutive_misses >= miss_threshold
-                        && self.pipeline_depth < self.config.max_depth
-                    {
-                        self.pipeline_depth += 1;
-                        self.consecutive_misses = 0;
-                    }
-                }
-                Some(false) => {
-                    // Real hit: count toward recovery.
-                    self.consecutive_hits += 1;
-                    self.consecutive_misses = 0;
-                    if self.consecutive_hits >= recovery_threshold
-                        && self.pipeline_depth > self.config.min_depth
-                    {
-                        self.pipeline_depth -= 1;
-                        self.consecutive_hits = 0;
-                    }
-                }
-                None => match feedback.pacing_overrun {
-                    Some(true) => {
-                        // Pacing-only overrun is weaker than a real miss, so
-                        // require more repeated evidence before raising depth.
-                        self.consecutive_misses += 1;
-                        self.consecutive_hits = 0;
-                        let pacing_threshold = miss_threshold.saturating_mul(2).max(1);
-                        if self.consecutive_misses >= pacing_threshold
-                            && self.pipeline_depth < self.config.max_depth
-                        {
-                            self.pipeline_depth += 1;
-                            self.consecutive_misses = 0;
-                        }
-                    }
-                    Some(false) | None => {
-                        // Unknown or clear pacing feedback should not pretend
-                        // to be a hit. Reset adaptation counters and continue
-                        // using the build-cost EMA for safety-margin training.
-                        self.consecutive_misses = 0;
-                        self.consecutive_hits = 0;
-                    }
-                },
-            },
-            DegradationPolicy::Fixed => {}
+        if let DegradationPolicy::Adaptive {
+            miss_threshold,
+            miss_window,
+            recovery_threshold,
+        } = self.config.degradation_policy
+        {
+            // A frame planned at another depth says nothing about this one.
+            if feedback
+                .pipeline_depth
+                .is_none_or(|depth| depth == self.pipeline_depth)
+            {
+                self.adapt_depth(feedback, miss_threshold, miss_window, recovery_threshold);
+            }
         }
+    }
+
+    /// Adapts pipeline depth to one frame's feedback.
+    ///
+    /// `missed_deadline` is the strong signal: the backend believes it can
+    /// classify the frame as a real hit or miss. `pacing_overrun` is weaker:
+    /// it only says the frame ran past a pacing boundary, so it takes twice
+    /// the misses to raise depth, and a frame that did not overrun is not
+    /// a hit. Feedback with neither says nothing, and breaks a run of hits.
+    fn adapt_depth(
+        &mut self,
+        feedback: &PresentFeedback,
+        miss_threshold: u32,
+        miss_window: u32,
+        recovery_threshold: u32,
+    ) {
+        let (missed, strong) = match (feedback.missed_deadline, feedback.pacing_overrun) {
+            (Some(missed), _) => (missed, true),
+            (None, Some(overran)) => (overran, false),
+            (None, None) => {
+                self.consecutive_hits = 0;
+                return;
+            }
+        };
+        self.misses.push(missed, miss_window);
+        if missed {
+            self.consecutive_hits = 0;
+            let threshold = if strong {
+                miss_threshold
+            } else {
+                miss_threshold.saturating_mul(2).min(miss_window)
+            };
+            if self.misses.misses() >= threshold && self.pipeline_depth < self.config.max_depth {
+                self.set_depth(self.pipeline_depth + 1);
+            }
+        } else if strong {
+            self.consecutive_hits = self.consecutive_hits.saturating_add(1);
+            if self.consecutive_hits >= recovery_threshold
+                && self.shallower_fits >= recovery_threshold
+                && self.pipeline_depth > self.config.min_depth
+            {
+                self.set_depth(self.pipeline_depth - 1);
+            }
+        } else {
+            self.consecutive_hits = 0;
+        }
+    }
+
+    fn set_depth(&mut self, depth: u8) {
+        self.pipeline_depth = depth;
+        self.misses = MissWindow::default();
+        self.consecutive_hits = 0;
+        self.shallower_fits = 0;
     }
 
     /// Returns the current pipeline depth.
@@ -775,7 +971,7 @@ impl Scheduler {
             pipeline_depth: self.pipeline_depth,
             present_latency_ticks: self.present_latency_ticks,
             safety_margin_ticks: self.safety_margin_ticks,
-            consecutive_misses: self.consecutive_misses,
+            recent_misses: self.misses.misses(),
             consecutive_hits: self.consecutive_hits,
             wake_lateness_ticks: self.wake_lateness_ticks,
         }
@@ -833,6 +1029,22 @@ mod tests {
             hints,
             display_timing: DisplayTiming::fixed(REFRESH_INTERVAL),
         }
+    }
+
+    /// Plans an animation frame with plenty of time before its deadline,
+    /// then observes `feedback` for it.
+    fn plan_roomy_and_observe(sched: &mut Scheduler, feedback: &PresentFeedback) {
+        _ = sched.plan(
+            make_opportunity(
+                PresentationTiming::Predictive,
+                1_000,
+                Some(17_000_000),
+                16_000_000,
+            ),
+            FrameDemand::ANIMATION,
+            0,
+        );
+        sched.observe(feedback);
     }
 
     #[test]
@@ -926,6 +1138,7 @@ mod tests {
         for _ in 0..20 {
             sched.observe(&PresentFeedback {
                 present_latency: Duration::ZERO,
+                pipeline_depth: None,
                 submitted_at: HostTime(1500),
                 commit_deadline: plan.commit_deadline,
                 build_start: HostTime(1000),
@@ -1025,6 +1238,7 @@ mod tests {
         for _ in 0..20 {
             sched.observe(&PresentFeedback {
                 present_latency: Duration::ZERO,
+                pipeline_depth: None,
                 submitted_at: HostTime(1500),
                 commit_deadline: HostTime(u64::MAX),
                 build_start: HostTime(1000),
@@ -1100,6 +1314,7 @@ mod tests {
         let mut sched = Scheduler::new(config);
         let feedback = PresentFeedback {
             present_latency: Duration::ZERO,
+            pipeline_depth: None,
             work: None,
             submitted_at: HostTime(1_200),
             commit_deadline: HostTime(u64::MAX),
@@ -1129,6 +1344,7 @@ mod tests {
         let mut sched = Scheduler::new(config);
         let feedback = PresentFeedback {
             present_latency: Duration::ZERO,
+            pipeline_depth: None,
             work: None,
             submitted_at: HostTime(1_200),
             commit_deadline: HostTime(u64::MAX),
@@ -1266,6 +1482,7 @@ mod tests {
         let mut sched = Scheduler::new(config);
         let feedback = PresentFeedback {
             present_latency: Duration::ZERO,
+            pipeline_depth: None,
             work: None,
             submitted_at: HostTime(21_000_000),
             commit_deadline: HostTime(u64::MAX),
@@ -1303,6 +1520,7 @@ mod tests {
         let mut sched = Scheduler::new(config);
         let feedback = PresentFeedback {
             present_latency: Duration::ZERO,
+            pipeline_depth: None,
             work: None,
             submitted_at: HostTime(11_000_000),
             commit_deadline: HostTime(u64::MAX),
@@ -1331,6 +1549,166 @@ mod tests {
         assert_eq!(plan.frame_start, HostTime(10_000_000));
     }
 
+    /// Teaches a scheduler with `ema_alpha` 1 that frames take `build`.
+    fn observe_build(sched: &mut Scheduler, build: u64) {
+        sched.observe(&PresentFeedback {
+            present_latency: Duration::ZERO,
+            pipeline_depth: None,
+            work: None,
+            submitted_at: HostTime(1_000_000 + build),
+            commit_deadline: HostTime(u64::MAX),
+            build_start: HostTime(1_000_000),
+            expected_present: None,
+            actual_present: None,
+            missed_deadline: None,
+            pacing_overrun: None,
+        });
+    }
+
+    fn cadence_scheduler() -> Scheduler {
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
+        config.ema_alpha = 1.0;
+        Scheduler::new(config)
+    }
+
+    fn animation_interval(sched: &mut Scheduler, now: u64) -> Duration {
+        sched
+            .plan(
+                make_opportunity(PresentationTiming::Predictive, now, None, now + 15_000_000),
+                FrameDemand::ANIMATION,
+                0,
+            )
+            .frame_interval
+    }
+
+    #[test]
+    fn cadence_holds_when_build_cost_hovers_at_a_boundary() {
+        let mut sched = cadence_scheduler();
+        // Animation needs its build cost and a quarter refresh: 12 ms fits
+        // one refresh, 13 ms does not.
+        observe_build(&mut sched, 13_000_000);
+        assert_eq!(
+            animation_interval(&mut sched, 1_000),
+            REFRESH_INTERVAL.saturating_mul(2)
+        );
+        for frame in 0..20 {
+            let build = if frame % 2 == 0 {
+                12_000_000
+            } else {
+                13_000_000
+            };
+            observe_build(&mut sched, build);
+            assert_eq!(
+                animation_interval(&mut sched, 1_000 + frame * 1_000),
+                REFRESH_INTERVAL.saturating_mul(2),
+                "frame {frame}"
+            );
+        }
+    }
+
+    #[test]
+    fn work_just_past_a_boundary_keeps_the_faster_cadence() {
+        let mut sched = cadence_scheduler();
+        observe_build(&mut sched, 5_000_000);
+        assert_eq!(animation_interval(&mut sched, 1_000), REFRESH_INTERVAL);
+
+        // 12.8 ms needs 17 ms with its quarter refresh to spare, within a
+        // sixteenth of the boundary: one slow frame does not halve the rate.
+        observe_build(&mut sched, 12_800_000);
+        assert_eq!(animation_interval(&mut sched, 2_000), REFRESH_INTERVAL);
+        observe_build(&mut sched, 14_000_000);
+        assert_eq!(
+            animation_interval(&mut sched, 3_000),
+            REFRESH_INTERVAL.saturating_mul(2)
+        );
+    }
+
+    #[test]
+    fn cadence_speeds_up_once_the_work_fits_with_room_and_the_hold_has_passed() {
+        let mut sched = cadence_scheduler();
+        observe_build(&mut sched, 5_000_000);
+        assert_eq!(animation_interval(&mut sched, 1_000), REFRESH_INTERVAL);
+        observe_build(&mut sched, 15_000_000);
+        assert_eq!(
+            animation_interval(&mut sched, 2_000),
+            REFRESH_INTERVAL.saturating_mul(2)
+        );
+
+        // 8 ms fits one refresh with room, but the slower cadence is new.
+        observe_build(&mut sched, 8_000_000);
+        assert_eq!(
+            animation_interval(&mut sched, 400_000_000),
+            REFRESH_INTERVAL.saturating_mul(2)
+        );
+        assert_eq!(
+            animation_interval(&mut sched, 500_002_000),
+            REFRESH_INTERVAL
+        );
+
+        // Slowing down again does not wait.
+        observe_build(&mut sched, 15_000_000);
+        assert_eq!(
+            animation_interval(&mut sched, 500_003_000),
+            REFRESH_INTERVAL.saturating_mul(2)
+        );
+    }
+
+    #[test]
+    fn a_first_cadence_is_not_held() {
+        let mut sched = cadence_scheduler();
+        // The first frame is costly, as first frames are.
+        observe_build(&mut sched, 14_000_000);
+        assert_eq!(
+            animation_interval(&mut sched, 1_000),
+            REFRESH_INTERVAL.saturating_mul(2)
+        );
+
+        // Nothing slowed down to that cadence, so it speeds up at once.
+        observe_build(&mut sched, 8_000_000);
+        assert_eq!(animation_interval(&mut sched, 2_000), REFRESH_INTERVAL);
+    }
+
+    #[test]
+    fn held_cadence_follows_a_wandering_refresh_interval() {
+        let mut sched = cadence_scheduler();
+        observe_build(&mut sched, 13_000_000);
+        assert_eq!(
+            animation_interval(&mut sched, 1_000),
+            REFRESH_INTERVAL.saturating_mul(2)
+        );
+
+        // The display measures a little faster; the cadence keeps its two
+        // refreshes, at the new interval.
+        observe_build(&mut sched, 12_000_000);
+        let measured = Duration(16_665_000);
+        let mut opportunity =
+            make_opportunity(PresentationTiming::Predictive, 2_000, None, 15_002_000);
+        opportunity.tick.refresh_interval = Some(measured);
+        opportunity.display_timing = DisplayTiming::fixed(measured);
+        let plan = sched.plan(opportunity, FrameDemand::ANIMATION, 0);
+        assert_eq!(plan.frame_interval, measured.saturating_mul(2));
+    }
+
+    #[test]
+    fn a_new_display_rate_starts_the_cadence_afresh() {
+        let mut sched = cadence_scheduler();
+        observe_build(&mut sched, 13_000_000);
+        assert_eq!(
+            animation_interval(&mut sched, 1_000),
+            REFRESH_INTERVAL.saturating_mul(2)
+        );
+
+        // At 120 Hz the same work fits two refreshes of 8.3 ms, so the frame
+        // interval drops to 16.7 ms at once, without waiting out the hold.
+        let fast = Duration(8_333_333);
+        let mut opportunity =
+            make_opportunity(PresentationTiming::Predictive, 2_000, None, 7_000_000);
+        opportunity.tick.refresh_interval = Some(fast);
+        opportunity.display_timing = DisplayTiming::fixed(fast);
+        let plan = sched.plan(opportunity, FrameDemand::ANIMATION, 0);
+        assert_eq!(plan.frame_interval, fast.saturating_mul(2));
+    }
+
     #[test]
     fn variable_refresh_without_granularity_uses_stable_divisor() {
         let mut config = SchedulerConfig::predictive(Timebase::NANOS);
@@ -1339,6 +1717,7 @@ mod tests {
         let mut sched = Scheduler::new(config);
         let feedback = PresentFeedback {
             present_latency: Duration::ZERO,
+            pipeline_depth: None,
             work: None,
             submitted_at: HostTime(13_000_000),
             commit_deadline: HostTime(u64::MAX),
@@ -1382,6 +1761,7 @@ mod tests {
         let mut sched = Scheduler::new(config);
         let feedback = PresentFeedback {
             present_latency: Duration::ZERO,
+            pipeline_depth: None,
             work: None,
             submitted_at: HostTime(13_000_000),
             commit_deadline: HostTime(u64::MAX),
@@ -1425,6 +1805,7 @@ mod tests {
 
         let feedback = PresentFeedback {
             present_latency: Duration::ZERO,
+            pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
             commit_deadline: HostTime(u64::MAX),
@@ -1509,12 +1890,11 @@ mod tests {
     }
 
     #[test]
-    fn consecutive_miss_counter_resets_on_success() {
-        let config = SchedulerConfig::predictive(Timebase::NANOS);
-        let mut sched = Scheduler::new(config);
-
+    fn misses_count_across_hits_within_the_window() {
+        let mut sched = Scheduler::new(SchedulerConfig::predictive(Timebase::NANOS));
         let miss = PresentFeedback {
             present_latency: Duration::ZERO,
+            pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
             commit_deadline: HostTime(u64::MAX),
@@ -1531,11 +1911,110 @@ mod tests {
 
         sched.observe(&miss);
         sched.observe(&miss);
-        sched.observe(&hit); // resets counter
-        sched.observe(&miss);
-        sched.observe(&miss);
-        // Only 2 consecutive misses, should not increase.
+        sched.observe(&hit);
         assert_eq!(sched.pipeline_depth(), 1);
+        // The third miss in the window raises depth, hit or no hit between.
+        sched.observe(&miss);
+        assert_eq!(sched.pipeline_depth(), 2);
+    }
+
+    #[test]
+    fn alternating_misses_raise_depth() {
+        let mut sched = Scheduler::new(SchedulerConfig::predictive(Timebase::NANOS));
+        let miss = PresentFeedback {
+            present_latency: Duration::ZERO,
+            pipeline_depth: None,
+            work: None,
+            submitted_at: HostTime(2000),
+            commit_deadline: HostTime(u64::MAX),
+            build_start: HostTime(1000),
+            expected_present: None,
+            actual_present: None,
+            missed_deadline: Some(true),
+            pacing_overrun: None,
+        };
+        let hit = PresentFeedback {
+            missed_deadline: Some(false),
+            ..miss
+        };
+
+        // Every other frame misses: never two in a row, but half of them.
+        for _ in 0..3 {
+            sched.observe(&miss);
+            sched.observe(&hit);
+        }
+        assert_eq!(sched.pipeline_depth(), 2);
+    }
+
+    #[test]
+    fn misses_older_than_the_window_do_not_count() {
+        let mut sched = Scheduler::new(SchedulerConfig::predictive(Timebase::NANOS));
+        let miss = PresentFeedback {
+            present_latency: Duration::ZERO,
+            pipeline_depth: None,
+            work: None,
+            submitted_at: HostTime(2000),
+            commit_deadline: HostTime(u64::MAX),
+            build_start: HostTime(1000),
+            expected_present: None,
+            actual_present: None,
+            missed_deadline: Some(true),
+            pacing_overrun: None,
+        };
+        let hit = PresentFeedback {
+            missed_deadline: Some(false),
+            ..miss
+        };
+
+        // One miss in every 30 frames is within the default policy.
+        for _ in 0..4 {
+            sched.observe(&miss);
+            for _ in 0..29 {
+                sched.observe(&hit);
+            }
+        }
+        assert_eq!(sched.pipeline_depth(), 1);
+    }
+
+    #[test]
+    fn feedback_planned_at_another_depth_does_not_move_depth() {
+        let mut sched = Scheduler::new(SchedulerConfig::predictive(Timebase::NANOS));
+        let miss = PresentFeedback {
+            present_latency: Duration::ZERO,
+            pipeline_depth: None,
+            work: None,
+            submitted_at: HostTime(2000),
+            commit_deadline: HostTime(u64::MAX),
+            build_start: HostTime(1000),
+            expected_present: None,
+            actual_present: None,
+            missed_deadline: Some(true),
+            pacing_overrun: None,
+        };
+        for _ in 0..3 {
+            sched.observe(&miss);
+        }
+        assert_eq!(sched.pipeline_depth(), 2);
+
+        // Frames planned at depth 1 were still in flight when it changed.
+        let in_flight = PresentFeedback {
+            pipeline_depth: Some(1),
+            ..miss
+        };
+        for _ in 0..3 {
+            sched.observe(&in_flight);
+        }
+        assert_eq!(sched.pipeline_depth(), 2);
+
+        // Frames planned at depth 2 count.
+        let planned = PresentFeedback {
+            pipeline_depth: Some(2),
+            ..miss
+        };
+        for _ in 0..3 {
+            sched.observe(&planned);
+        }
+        assert_eq!(sched.pipeline_depth(), 3);
     }
 
     #[test]
@@ -1547,6 +2026,7 @@ mod tests {
 
         let hit = PresentFeedback {
             present_latency: Duration::ZERO,
+            pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
             commit_deadline: HostTime(u64::MAX),
@@ -1557,12 +2037,53 @@ mod tests {
             pacing_overrun: None,
         };
 
-        for _ in 0..9 {
+        for _ in 0..59 {
+            plan_roomy_and_observe(&mut sched, &hit);
+        }
+        assert_eq!(sched.pipeline_depth(), 3); // 59 hits, not enough
+        plan_roomy_and_observe(&mut sched, &hit); // 60th hit → decrease
+        assert_eq!(sched.pipeline_depth(), 2);
+    }
+
+    #[test]
+    fn depth_holds_while_one_shallower_would_not_have_time() {
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
+        config.initial_depth = 2;
+        config.ema_alpha = 1.0;
+        let mut sched = Scheduler::new(config);
+
+        // Every frame is on time, but takes 5 ms, and its tick comes 2 ms
+        // before the deadline: one depth shallower it would have to start
+        // before its tick.
+        let hit = PresentFeedback {
+            present_latency: Duration::ZERO,
+            pipeline_depth: None,
+            work: None,
+            submitted_at: HostTime(5_001_000),
+            commit_deadline: HostTime(u64::MAX),
+            build_start: HostTime(1_000),
+            expected_present: None,
+            actual_present: None,
+            missed_deadline: Some(false),
+            pacing_overrun: None,
+        };
+        let tight = make_opportunity(
+            PresentationTiming::Predictive,
+            1_000,
+            Some(3_000_000),
+            2_000_000,
+        );
+        for _ in 0..100 {
+            _ = sched.plan(tight, FrameDemand::ANIMATION, 0);
             sched.observe(&hit);
         }
-        assert_eq!(sched.pipeline_depth(), 3); // 9 hits, not enough
-        sched.observe(&hit); // 10th hit → decrease
         assert_eq!(sched.pipeline_depth(), 2);
+
+        // With room before the deadline, it comes back.
+        for _ in 0..60 {
+            plan_roomy_and_observe(&mut sched, &hit);
+        }
+        assert_eq!(sched.pipeline_depth(), 1);
     }
 
     #[test]
@@ -1575,6 +2096,7 @@ mod tests {
 
         let miss = PresentFeedback {
             present_latency: Duration::ZERO,
+            pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
             commit_deadline: HostTime(u64::MAX),
@@ -1599,12 +2121,14 @@ mod tests {
         let mut config = SchedulerConfig::predictive(Timebase::NANOS);
         config.degradation_policy = DegradationPolicy::Adaptive {
             miss_threshold: 5,
+            miss_window: 30,
             recovery_threshold: 10,
         };
         let mut sched = Scheduler::new(config);
 
         let miss = PresentFeedback {
             present_latency: Duration::ZERO,
+            pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
             commit_deadline: HostTime(u64::MAX),
@@ -1629,6 +2153,7 @@ mod tests {
         config.initial_depth = 2;
         config.degradation_policy = DegradationPolicy::Adaptive {
             miss_threshold: 3,
+            miss_window: 30,
             recovery_threshold: 2,
         };
         let mut sched = Scheduler::new(config);
@@ -1636,6 +2161,7 @@ mod tests {
 
         let hit = PresentFeedback {
             present_latency: Duration::ZERO,
+            pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
             commit_deadline: HostTime(u64::MAX),
@@ -1647,13 +2173,13 @@ mod tests {
         };
 
         // 2 hits → decrease to 1 (min_depth).
-        sched.observe(&hit);
-        sched.observe(&hit);
+        plan_roomy_and_observe(&mut sched, &hit);
+        plan_roomy_and_observe(&mut sched, &hit);
         assert_eq!(sched.pipeline_depth(), 1);
 
         // 2 more hits → should stay at 1, can't go below min_depth.
-        sched.observe(&hit);
-        sched.observe(&hit);
+        plan_roomy_and_observe(&mut sched, &hit);
+        plan_roomy_and_observe(&mut sched, &hit);
         assert_eq!(sched.pipeline_depth(), 1);
     }
 
@@ -1675,12 +2201,11 @@ mod tests {
     }
 
     #[test]
-    fn observe_with_unknown_deadline_resets_counters() {
-        let config = SchedulerConfig::predictive(Timebase::NANOS);
-        let mut sched = Scheduler::new(config);
-
+    fn feedback_without_a_verdict_neither_counts_nor_clears_misses() {
+        let mut sched = Scheduler::new(SchedulerConfig::predictive(Timebase::NANOS));
         let miss = PresentFeedback {
             present_latency: Duration::ZERO,
+            pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
             commit_deadline: HostTime(u64::MAX),
@@ -1696,17 +2221,12 @@ mod tests {
             ..miss
         };
 
-        // Accumulate 2 misses, then an unknown.
         sched.observe(&miss);
         sched.observe(&miss);
-        sched.observe(&unknown); // resets both counters
-
-        // Two more misses — total consecutive is only 2, not 4.
-        sched.observe(&miss);
-        sched.observe(&miss);
-        assert_eq!(sched.pipeline_depth(), 1, "counter should have been reset");
-
-        // One more miss pushes to 3 consecutive → depth increases.
+        for _ in 0..40 {
+            sched.observe(&unknown);
+        }
+        assert_eq!(sched.pipeline_depth(), 1);
         sched.observe(&miss);
         assert_eq!(sched.pipeline_depth(), 2);
     }
@@ -1718,6 +2238,7 @@ mod tests {
 
         let unknown = PresentFeedback {
             present_latency: Duration::ZERO,
+            pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2_000),
             commit_deadline: HostTime(u64::MAX),
@@ -1745,6 +2266,7 @@ mod tests {
         config.max_depth = 3;
         config.degradation_policy = DegradationPolicy::Adaptive {
             miss_threshold: 1,
+            miss_window: 30,
             recovery_threshold: 10,
         };
         let mut sched = Scheduler::new(config);
@@ -1752,6 +2274,7 @@ mod tests {
 
         let miss = PresentFeedback {
             present_latency: Duration::ZERO,
+            pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
             commit_deadline: HostTime(u64::MAX),
@@ -1777,6 +2300,7 @@ mod tests {
 
         let feedback = PresentFeedback {
             present_latency: Duration::ZERO,
+            pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
             commit_deadline: HostTime(u64::MAX),
@@ -1801,6 +2325,7 @@ mod tests {
 
         let overrun = PresentFeedback {
             present_latency: Duration::ZERO,
+            pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2_000),
             commit_deadline: HostTime(u64::MAX),
@@ -1821,12 +2346,13 @@ mod tests {
     }
 
     #[test]
-    fn pacing_overrun_counters_reset_on_clear_tick() {
+    fn pacing_overruns_count_across_clear_ticks() {
         let config = SchedulerConfig::pacing_only(Timebase::NANOS);
         let mut sched = Scheduler::new(config);
 
         let overrun = PresentFeedback {
             present_latency: Duration::ZERO,
+            pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2_000),
             commit_deadline: HostTime(u64::MAX),
@@ -1845,10 +2371,9 @@ mod tests {
             sched.observe(&overrun);
         }
         sched.observe(&clear);
-        for _ in 0..5 {
+        for _ in 0..2 {
             sched.observe(&overrun);
         }
-
         assert_eq!(sched.pipeline_depth(), 1);
         sched.observe(&overrun);
         assert_eq!(sched.pipeline_depth(), 2);
