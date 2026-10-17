@@ -17,7 +17,7 @@ use frameclock::diagnostics::{
 use frameclock::scheduler::SchedulerState;
 use frameclock::time::Timebase;
 use frameclock::timing::{FrameDemand, PresentationTiming};
-use frameclock::{Duration, HostTime, OutputId};
+use frameclock::{BufferWait, Duration, HostTime, OutputId};
 use frameclock_footfall::{HOST_CLOCK, Recorder};
 
 /// Mach absolute time on Apple silicon: 125 ns per 3 ticks.
@@ -154,6 +154,11 @@ fn taken(backend: &Recording) -> Vec<Seen> {
 }
 
 fn summary(frame_index: u64) -> FrameTimingSummary {
+    summary_with_wait(frame_index, None)
+}
+
+/// [`summary`], with how long the frame waited for a buffer.
+fn summary_with_wait(frame_index: u64, buffer_wait: Option<BufferWait>) -> FrameTimingSummary {
     let output = OutputId(0);
     let mut summary = FrameTimingSummaryBuilder::from_tick_and_plan(
         &FrameTickEvent {
@@ -184,7 +189,7 @@ fn summary(frame_index: u64) -> FrameTimingSummary {
             frame_index,
             submitted_at: HostTime(2_900),
             expected_present: Some(HostTime(4_100)),
-            buffer_wait: None,
+            buffer_wait,
         })
         .record_present_feedback(&PresentFeedbackEvent {
             frame_index,
@@ -259,6 +264,47 @@ fn a_shown_frame_records_every_time_frameclock_knows_in_host_ticks() {
                 Unit::Nanos,
                 "histogram",
                 25_000
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_wait_for_a_buffer_is_recorded_as_observed_points() {
+    let (backend, _serial) = recording();
+    let wait = BufferWait {
+        requested: HostTime(1_300),
+        acquired: HostTime(1_900),
+    };
+    Recorder::new(MACH).record(&summary_with_wait(77, Some(wait)));
+
+    let buffer: Vec<_> = taken(backend)
+        .into_iter()
+        .filter(|seen| {
+            matches!(
+                seen,
+                Seen::Point(
+                    _,
+                    FramePointKind::BufferRequested | FramePointKind::BufferAcquired,
+                    ..
+                )
+            )
+        })
+        .collect();
+    assert_eq!(
+        buffer,
+        [
+            Seen::Point(
+                77.into(),
+                FramePointKind::BufferRequested,
+                Some(1_300),
+                TimingBasis::Observed
+            ),
+            Seen::Point(
+                77.into(),
+                FramePointKind::BufferAcquired,
+                Some(1_900),
+                TimingBasis::Observed
             ),
         ]
     );
