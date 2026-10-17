@@ -119,6 +119,11 @@ impl CaDisplayLink {
     /// The presentation feedback this display link provides: each tick
     /// reports the previous refresh, which resolves a frame submitted on the
     /// tick before it.
+    ///
+    /// That is when a Core Animation transaction is shown. A Metal drawable
+    /// is shown later, after its GPU work and any frames queued ahead of it:
+    /// submit those with [`AppleFeedbackMode::Reported`] and report each
+    /// drawable's `presentedTime`.
     pub const FEEDBACK_MODE: AppleFeedbackMode = AppleFeedbackMode::DeferredActualPresent;
 
     /// Returns the Mach absolute time timebase.
