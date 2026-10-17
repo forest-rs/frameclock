@@ -179,6 +179,7 @@ fn summary(frame_index: u64) -> FrameTimingSummary {
                 recent_misses: 1,
                 consecutive_hits: 0,
                 wake_lateness_ticks: 0,
+                queue_drains: 0,
             },
         });
     let summary = summary
