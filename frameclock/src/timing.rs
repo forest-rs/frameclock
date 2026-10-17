@@ -406,6 +406,10 @@ pub struct FramePlan {
     /// Time applications should sample animation and simulation state for.
     pub sample_time: HostTime,
     /// Intended display time, if known.
+    ///
+    /// It includes the learned [`present_latency`](Self::present_latency).
+    /// A present that takes a time not to show the frame before should be
+    /// given [`requested_present`](Self::requested_present) instead.
     pub target_present: Option<HostTime>,
     /// How [`target_present`](Self::target_present) should be interpreted.
     pub presentation_timing: PresentationTiming,
@@ -458,6 +462,24 @@ impl BufferWait {
     #[must_use]
     pub const fn duration(self) -> Duration {
         self.acquired.saturating_duration_since(self.requested)
+    }
+}
+
+impl FramePlan {
+    /// Returns the time to give a present that takes one, such as
+    /// `VK_GOOGLE_display_timing`'s `desiredPresentTime`: the earliest the
+    /// frame may be shown, which is its target without the learned
+    /// [`present_latency`](Self::present_latency).
+    ///
+    /// The target is when the frame is expected to be seen, for sampling. A
+    /// present told not to show the frame before then holds it until then,
+    /// so the latency it was planned with comes true: it can never be seen
+    /// sooner, and the scheduler can never learn that it could be. Ask for
+    /// this time instead, and let the pipeline add what it adds.
+    #[must_use]
+    pub fn requested_present(&self) -> Option<HostTime> {
+        let target = self.target_present?;
+        Some(target.checked_sub(self.present_latency).unwrap_or(target))
     }
 }
 
