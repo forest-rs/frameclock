@@ -911,6 +911,13 @@ impl Scheduler {
     /// it only says the frame ran past a pacing boundary, so it takes twice
     /// the misses to raise depth, and a frame that did not overrun is not
     /// a hit. Feedback with neither says nothing, and breaks a run of hits.
+    ///
+    /// A frame shown late that was committed by its deadline is not a miss
+    /// here. Depth moves a frame's target and deadline together, so it gives
+    /// more time only to a frame whose build did not fit; one built in time
+    /// and shown late was held by the presentation pipeline, which
+    /// [`SchedulerConfig::present_latency_alpha`] learns and
+    /// [`SchedulerConfig::queue_drain_after`] drains.
     fn adapt_depth(
         &mut self,
         feedback: &PresentFeedback,
@@ -918,8 +925,9 @@ impl Scheduler {
         miss_window: u32,
         recovery_threshold: u32,
     ) {
+        let built_late = feedback.submitted_at > feedback.commit_deadline;
         let (missed, strong) = match (feedback.missed_deadline, feedback.pacing_overrun) {
-            (Some(missed), _) => (missed, true),
+            (Some(missed), _) => (missed && built_late, true),
             (None, Some(overran)) => (overran, false),
             (None, None) => {
                 self.consecutive_hits = 0;
@@ -1853,7 +1861,7 @@ mod tests {
             pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
-            commit_deadline: HostTime(u64::MAX),
+            commit_deadline: HostTime(1500),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -1942,7 +1950,7 @@ mod tests {
             pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
-            commit_deadline: HostTime(u64::MAX),
+            commit_deadline: HostTime(1500),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -1964,6 +1972,39 @@ mod tests {
     }
 
     #[test]
+    fn frames_built_in_time_and_shown_late_do_not_raise_depth() {
+        let mut sched = Scheduler::new(SchedulerConfig::predictive(Timebase::NANOS));
+        // Committed by the deadline, shown two refreshes after the target:
+        // the compositor held them, and more depth would not help.
+        let held = PresentFeedback {
+            present_latency: Duration::ZERO,
+            pipeline_depth: None,
+            work: None,
+            submitted_at: HostTime(1500),
+            commit_deadline: HostTime(1800),
+            build_start: HostTime(1000),
+            expected_present: Some(HostTime(2000)),
+            actual_present: Some(HostTime(2000 + 2 * REFRESH_INTERVAL.ticks())),
+            missed_deadline: Some(true),
+            pacing_overrun: None,
+        };
+        for _ in 0..30 {
+            sched.observe(&held);
+        }
+        assert_eq!(sched.pipeline_depth(), 1);
+
+        // Committed after the deadline, they are misses.
+        let built_late = PresentFeedback {
+            submitted_at: HostTime(1900),
+            ..held
+        };
+        for _ in 0..3 {
+            sched.observe(&built_late);
+        }
+        assert_eq!(sched.pipeline_depth(), 2);
+    }
+
+    #[test]
     fn alternating_misses_raise_depth() {
         let mut sched = Scheduler::new(SchedulerConfig::predictive(Timebase::NANOS));
         let miss = PresentFeedback {
@@ -1971,7 +2012,7 @@ mod tests {
             pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
-            commit_deadline: HostTime(u64::MAX),
+            commit_deadline: HostTime(1500),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -1999,7 +2040,7 @@ mod tests {
             pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
-            commit_deadline: HostTime(u64::MAX),
+            commit_deadline: HostTime(1500),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -2029,7 +2070,7 @@ mod tests {
             pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
-            commit_deadline: HostTime(u64::MAX),
+            commit_deadline: HostTime(1500),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -2184,7 +2225,7 @@ mod tests {
             pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
-            commit_deadline: HostTime(u64::MAX),
+            commit_deadline: HostTime(1500),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -2216,7 +2257,7 @@ mod tests {
             pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
-            commit_deadline: HostTime(u64::MAX),
+            commit_deadline: HostTime(1500),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -2293,7 +2334,7 @@ mod tests {
             pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
-            commit_deadline: HostTime(u64::MAX),
+            commit_deadline: HostTime(1500),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -2362,7 +2403,7 @@ mod tests {
             pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
-            commit_deadline: HostTime(u64::MAX),
+            commit_deadline: HostTime(1500),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
