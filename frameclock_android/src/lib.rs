@@ -21,8 +21,11 @@
 //! or `VK_GOOGLE_display_timing`'s actual present time, to
 //! [`FrameDriver::report_frame`](frameclock::FrameDriver::report_frame). The
 //! driver drains a frame queued behind one that missed `SurfaceFlinger`'s
-//! deadline only from those times. [`FrameBudget::ready_lead`] is the host's
-//! estimate; a frame committed in time and shown late says it was too short.
+//! deadline only from those times.
+//!
+//! [`LearnedBudget`] learns the [`FrameBudget`] from each frame's begin,
+//! submission, and readiness times, and widens it when a frame submitted in
+//! time still misses its timeline.
 //!
 //! Keep the selected timeline ID with the frame. [`SelectedTimeline::bind`]
 //! refuses a plan that silently moves its native target or deadline. This is
@@ -115,6 +118,108 @@ impl FrameTimeline {
     #[must_use]
     pub const fn ready_deadline(self) -> HostTime {
         self.ready_deadline
+    }
+}
+
+/// Learns a [`FrameBudget`] from when each frame began, was submitted, and
+/// was ready.
+///
+/// Each part is estimated as round-trip times are for TCP's retransmission
+/// timer (RFC 6298): a smoothed mean plus four smoothed deviations. Too
+/// short a budget picks a timeline the frame cannot make, and it is shown a
+/// refresh late; too long a budget picks a later timeline than needed, which
+/// costs latency. The deviation term keeps the budget just past the spread
+/// the frames have shown.
+///
+/// Feed it every frame with [`observe`](Self::observe): when its CPU work
+/// began, when it was submitted, and when it was ready. A frame is ready
+/// when its GPU work finished and its buffer could be latched: its acquire
+/// fence's signal time in `SurfaceControl` transaction stats, EGL's
+/// `EGL_RENDERING_COMPLETE_TIME_ANDROID`, or a Vulkan fence and timestamp,
+/// in `CLOCK_MONOTONIC` nanoseconds. Call [`missed`](Self::missed) for a
+/// frame submitted by its CPU deadline that still missed its timeline: the
+/// budget widens even when the times it saw looked in time.
+#[derive(Clone, Copy, Debug)]
+pub struct LearnedBudget {
+    build: Estimate,
+    ready_lead: Estimate,
+}
+
+/// A smoothed mean and mean deviation of one duration, in nanoseconds.
+#[derive(Clone, Copy, Debug)]
+struct Estimate {
+    mean: u64,
+    deviation: u64,
+    seen: bool,
+}
+
+/// How far a missed frame widens the ready lead's deviation at least.
+const MISSED_DEVIATION_NS: u64 = 1_000_000;
+
+impl Estimate {
+    const fn new(initial: Duration) -> Self {
+        Self {
+            mean: initial.ticks(),
+            deviation: 0,
+            seen: false,
+        }
+    }
+
+    fn observe(&mut self, sample: u64) {
+        if self.seen {
+            // RFC 6298: deviation first, against the old mean, by 1/4; then
+            // the mean, by 1/8.
+            let off = self.mean.abs_diff(sample);
+            self.deviation = (3 * self.deviation + off) / 4;
+            self.mean = (7 * self.mean + sample) / 8;
+        } else {
+            self.mean = sample;
+            self.deviation = sample / 2;
+            self.seen = true;
+        }
+    }
+
+    fn widen(&mut self) {
+        self.deviation = self.deviation.saturating_mul(2).max(MISSED_DEVIATION_NS);
+    }
+
+    const fn value(self) -> Duration {
+        Duration(self.mean.saturating_add(self.deviation.saturating_mul(4)))
+    }
+}
+
+impl LearnedBudget {
+    /// Starts from `initial`, used as is until the first frame is observed.
+    #[must_use]
+    pub const fn new(initial: FrameBudget) -> Self {
+        Self {
+            build: Estimate::new(initial.build),
+            ready_lead: Estimate::new(initial.ready_lead),
+        }
+    }
+
+    /// Learns from one frame: when its CPU work began, when it was
+    /// submitted, and when it was ready. Times out of order count as zero.
+    pub fn observe(&mut self, build_start: HostTime, submitted_at: HostTime, ready_at: HostTime) {
+        self.build
+            .observe(submitted_at.saturating_duration_since(build_start).ticks());
+        self.ready_lead
+            .observe(ready_at.saturating_duration_since(submitted_at).ticks());
+    }
+
+    /// Widens the ready lead after a frame submitted by its CPU deadline
+    /// missed its timeline anyway.
+    pub fn missed(&mut self) {
+        self.ready_lead.widen();
+    }
+
+    /// Returns the budget to select the next timeline with.
+    #[must_use]
+    pub const fn budget(&self) -> FrameBudget {
+        FrameBudget {
+            build: self.build.value(),
+            ready_lead: self.ready_lead.value(),
+        }
     }
 }
 
