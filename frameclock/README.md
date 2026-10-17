@@ -248,6 +248,15 @@ makes it choose a slower, steady cadence instead of alternating intervals. The
 driver holds up to `REPORTED_FRAME_CAPACITY` frames, resolves each from its own
 report in any order, and returns its summary from that call.
 
+Whichever row fits, a frame that waits for a buffer to render into, in
+`nextDrawable`, `dequeueBuffer`, or `vkAcquireNextImageKHR`, should say so:
+`FrameSubmission::with_buffer_wait(requested, acquired)`, with the times before
+and after the call. The wait is backpressure from frames queued ahead, not the
+frame's work, so the scheduler leaves it out of build cost; counted as work, a
+full presentation pipeline would look like slow frames, and the scheduler
+would drop the cadence or start frames earlier for it. The frame's summary
+carries the wait as a `BufferWait`.
+
 ## Display Timing And VRR
 
 `DisplayTiming::fixed(interval)` is the right model when a backend has only a
