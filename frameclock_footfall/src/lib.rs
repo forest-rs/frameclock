@@ -251,6 +251,8 @@ impl Recorder {
     /// | `commit_deadline` | [`Deadline`](FramePointKind::Deadline) | | the plan's scheduler state, below |
     /// | `target_present` | [`Target`](FramePointKind::Target) | | |
     /// | `sample_time` | [`Sampled`](FramePointKind::Sampled) | | `held_back_ns`, when held back |
+    /// | `buffer_wait.requested` | [`BufferRequested`](FramePointKind::BufferRequested) | observed | |
+    /// | `buffer_wait.acquired` | [`BufferAcquired`](FramePointKind::BufferAcquired) | observed | |
     /// | `submitted_at` | [`Submitted`](FramePointKind::Submitted) | observed | `work_ns`, when reported |
     /// | `expected_present` | [`Expected`](FramePointKind::Expected) | | |
     /// | `actual_present` | [`Presented`](FramePointKind::Presented) | observed for `ActualPresent`, otherwise estimated | |
@@ -317,6 +319,16 @@ impl Recorder {
             footfall_core::frame_point(&sampled.with_args(
                 Args::none().with("held_back_ns", self.nanos(summary.held_back.ticks())),
             ));
+        }
+        if let Some(wait) = summary.buffer_wait {
+            for (kind, at) in [
+                (FramePointKind::BufferRequested, wait.requested),
+                (FramePointKind::BufferAcquired, wait.acquired),
+            ] {
+                footfall_core::frame_point(
+                    &self.at(number, kind, at).with_basis(TimingBasis::Observed),
+                );
+            }
         }
         if let Some(at) = summary.submitted_at {
             let work = match summary.work {
