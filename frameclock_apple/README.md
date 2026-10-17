@@ -222,6 +222,39 @@ in seconds; convert them to Mach ticks with `Duration::from_nanos`. Then use
 `CaDisplayLink::set_preferred_frame_interval` to translate a planned
 `FramePlan::frame_interval` into a Core Animation frame-rate range.
 
+## Choosing a Display Link
+
+On a 120 Hz Mac, rendering 1 ms of work into a small window, the links
+reached the screen this long after their callbacks:
+
+| Link | Callback to on screen | |
+|---|---|---|
+| `CaDisplayLink`, presenting `nextDrawable` at once | 25 ms, 3 refreshes | the lowest |
+| `CvDisplayLink`, the same way | 28 or 37 ms | ticks wait for the main queue |
+| `CaMetalDisplayLink` | 41.5 ms, 5 refreshes | planned by macOS |
+
+For an interactive window, use `CaDisplayLink` and present as soon as the
+frame is rendered. `CaMetalDisplayLink` hands each update its drawable, a
+hard deadline, and a target, but in a window macOS plans that target five
+refreshes ahead whatever `preferred_frame_latency` asks for. `CvDisplayLink`
+ticks hop to the main queue, and where they land against the compositor's
+cutoff decides whether a frame waits an extra refresh. The layer's setup,
+layer-hosting or layer-backed and at backing scale or not, made no
+difference.
+
+On the `CaDisplayLink` path, a present that misses the compositor's cutoff
+leaves a frame queued, and every later frame is shown a refresh later until
+one is skipped. Report each drawable's `presentedTime` with
+`AppleFeedbackMode::Reported`, as the Metal display link's loop below does,
+and the scheduler sees this and holds one frame back to drain it
+(`SchedulerConfig::queue_drain_after`). With a 9 ms spike every 200 frames,
+69 to 84% of frames were shown at 25 ms with draining and 14 to 27% without.
+`CaDisplayLink::FEEDBACK_MODE` resolves frames from the link's own
+timestamps instead, which miss the queue.
+
+Presenting faster than the display refreshes, such as from a timer, fills the
+drawable queue the same way: frames took 33 to 40 ms.
+
 ## Metal Display Link
 
 With the `metal-display-link` feature, `CaMetalDisplayLink` drives a

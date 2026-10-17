@@ -90,6 +90,29 @@ pub struct SchedulerConfig {
     /// has been held this long. A build cost near a boundary would otherwise
     /// switch the cadence back and forth, and each switch is itself a hitch.
     pub cadence_hold: Duration,
+    /// How many frames in a row must be shown at least a refresh later than
+    /// the lowest latency seen before the scheduler holds the next frame
+    /// back a refresh, to drain a frame queued in the presentation pipeline;
+    /// `0` turns it off.
+    ///
+    /// A present that misses the compositor's cutoff waits a refresh, and a
+    /// host that presents one frame a refresh keeps that frame queued, so
+    /// every later frame is shown a refresh later too, for as long as the
+    /// host keeps up. Nothing reports it: the frames are steady, only late.
+    /// Holding one frame back leaves the queue a refresh to empty. It costs
+    /// that frame a refresh and every later one wins a refresh back.
+    ///
+    /// Latency here is from when a frame's build began to when it was shown,
+    /// from feedback that carries each frame's
+    /// [`PresentFeedback::actual_present`], for frames committed by their
+    /// deadlines. If holding a frame back does not
+    /// bring the latency down, the pipeline has changed, such as a window
+    /// moved to another display, and the latency it has now becomes the
+    /// lowest, so a change costs at most three held frames: one does not
+    /// always drain the queue.
+    ///
+    /// [`PresentFeedback::actual_present`]: crate::timing::PresentFeedback::actual_present
+    pub queue_drain_after: u32,
     /// EMA smoothing factor for how late frames are actually shown
     /// (0.0-1.0); `0.0` turns the compensation off.
     ///
@@ -135,6 +158,10 @@ const DEFAULT_DEGRADATION_POLICY: DegradationPolicy = DegradationPolicy::Adaptiv
     miss_window: 30,
     recovery_threshold: 60,
 };
+
+/// The default [`SchedulerConfig::queue_drain_after`]: a quarter second at
+/// 120 Hz.
+const DEFAULT_QUEUE_DRAIN_AFTER: u32 = 30;
 
 /// The most frames [`DegradationPolicy::Adaptive`] counts misses over.
 const MAX_MISS_WINDOW: u32 = 64;
@@ -184,6 +211,7 @@ impl SchedulerConfig {
             nominal_latency: Duration(0),
             degradation_policy: DEFAULT_DEGRADATION_POLICY,
             cadence_hold: Duration::from_nanos(DEFAULT_CADENCE_HOLD_NANOS, timebase),
+            queue_drain_after: DEFAULT_QUEUE_DRAIN_AFTER,
             present_latency_alpha: 0.1,
             timebase,
         }
@@ -209,6 +237,7 @@ impl SchedulerConfig {
             nominal_latency: Duration(0),
             degradation_policy: DEFAULT_DEGRADATION_POLICY,
             cadence_hold: Duration::from_nanos(DEFAULT_CADENCE_HOLD_NANOS, timebase),
+            queue_drain_after: DEFAULT_QUEUE_DRAIN_AFTER,
             present_latency_alpha: 0.1,
             timebase,
         }
@@ -235,7 +264,8 @@ impl SchedulerConfig {
             degradation_policy: DEFAULT_DEGRADATION_POLICY,
             cadence_hold: Duration::from_nanos(DEFAULT_CADENCE_HOLD_NANOS, timebase),
             // Without an actual-present timestamp there is nothing to
-            // learn how late a frame was.
+            // learn how late a frame was, or to drain.
+            queue_drain_after: 0,
             present_latency_alpha: 0.0,
             timebase,
         }
@@ -262,6 +292,10 @@ pub struct SchedulerState {
     /// host-time ticks, because the host wakes late for it: what
     /// [`Scheduler::observe_wake`] learned.
     pub wake_lateness_ticks: u64,
+    /// How many times the scheduler has held a frame back a refresh to drain
+    /// a frame queued in the presentation pipeline; see
+    /// [`SchedulerConfig::queue_drain_after`].
+    pub queue_drains: u64,
 }
 
 /// The most refresh intervals [`SchedulerConfig::present_latency_alpha`]
@@ -324,6 +358,72 @@ impl HeldCadence {
                 .choose_interval(scaled.saturating_sub(Duration(1)))
                 .max(fastest),
         )
+    }
+}
+
+/// How many held frames in a row may fail to bring latency down before the
+/// scheduler takes it as the pipeline's latency now. A held frame drains a
+/// queued one most of the time, not always.
+const DRAIN_ATTEMPTS: u32 = 3;
+
+/// What the scheduler knows about frames queued in the presentation
+/// pipeline; see [`SchedulerConfig::queue_drain_after`].
+#[derive(Clone, Copy, Debug, Default)]
+struct QueueDrain {
+    /// The lowest latency seen, in host ticks: how long after its build
+    /// began a frame is shown with nothing queued ahead of it.
+    floor: Option<u64>,
+    /// Frames in a row shown at least a refresh later than the floor.
+    late: u32,
+    /// The latest three latencies, oldest first: the floor follows their
+    /// median, so one outlier either way does not move it.
+    recent: [u64; 3],
+    /// How many latencies `recent` holds.
+    seen: u8,
+    /// Whether the next plan holds its frame back a refresh.
+    pending: bool,
+    /// How many frames have been held back since the floor was last
+    /// reached: a held frame does not always drain the queue, but latency
+    /// that stays up through [`DRAIN_ATTEMPTS`] means the pipeline changed.
+    tried: u32,
+    /// The refresh interval of the last plan, in host ticks.
+    interval: u64,
+    drains: u64,
+}
+
+impl QueueDrain {
+    /// Learns from one frame shown `latency` ticks after its build began,
+    /// and decides whether to drain.
+    fn observe(&mut self, latency: u64, after: u32) {
+        self.recent = [self.recent[1], self.recent[2], latency];
+        self.seen = (self.seen + 1).min(3);
+        if self.seen < 3 {
+            return;
+        }
+        let mut sorted = self.recent;
+        sorted.sort_unstable();
+        let floor = self.floor.map_or(sorted[1], |floor| floor.min(sorted[1]));
+        self.floor = Some(floor);
+        if latency < floor + self.interval / 2 {
+            // Nothing queued, or less than a refresh: the floor holds.
+            self.late = 0;
+            self.tried = 0;
+            return;
+        }
+        self.late = self.late.saturating_add(1);
+        if self.late < after || self.pending {
+            return;
+        }
+        self.late = 0;
+        if self.tried >= DRAIN_ATTEMPTS {
+            // Holding frames back did not bring it down: the pipeline
+            // changed, and this is its latency now.
+            self.floor = Some(latency);
+            self.tried = 0;
+        } else {
+            self.pending = true;
+            self.tried += 1;
+        }
     }
 }
 
@@ -465,6 +565,7 @@ pub struct Scheduler {
     /// shallower.
     shallower_fits: u32,
     cadence: Option<HeldCadence>,
+    drain: QueueDrain,
 }
 
 impl Scheduler {
@@ -503,6 +604,7 @@ impl Scheduler {
             consecutive_hits: 0,
             shallower_fits: 0,
             cadence: None,
+            drain: QueueDrain::default(),
             config,
         }
     }
@@ -551,11 +653,21 @@ impl Scheduler {
         );
         // A hard deadline belongs to a resource that pipeline depth cannot
         // give more time, so only the cadence moves it.
+        self.drain.interval = source_interval.ticks();
+        // Holding a frame back a refresh drains a frame queued ahead of it.
+        let held_back = if self.drain.pending {
+            self.drain.pending = false;
+            self.drain.drains += 1;
+            source_interval
+        } else {
+            Duration::ZERO
+        };
         let schedule_delta = if hints.has_hard_deadline() {
             frame_interval.saturating_sub(source_interval)
         } else {
             self.schedule_delta(demand, frame_interval, source_interval)
-        };
+        }
+        .saturating_add(held_back);
         let presentation_timing = hints.presentation_timing();
         let platform_present = if presentation_timing.has_target_present() {
             hints
@@ -604,7 +716,11 @@ impl Scheduler {
             demand,
             frame_interval,
             frame_start: if hints.starts_at_tick() {
-                tick_aligned_start(tick.now, frame_interval, source_interval)
+                tick_aligned_start(
+                    tick.now,
+                    frame_interval.saturating_add(held_back),
+                    source_interval,
+                )
             } else {
                 self.frame_start(tick.now, commit_deadline, demand)
             },
@@ -866,6 +982,19 @@ impl Scheduler {
             self.present_latency_ema.update(latency);
             self.present_latency_ticks = f64_ticks_to_u64(self.present_latency_ema.get());
         }
+        if self.config.queue_drain_after > 0
+            && feedback.submitted_at <= feedback.commit_deadline
+            && let Some(actual) = feedback.actual_present
+        {
+            // From when its build began to when it was shown. A host starts
+            // each frame at about the same point in the refresh, so this is
+            // steady, and a refresh longer for each frame queued ahead,
+            // whatever the plan aimed for: depth and cadence move targets,
+            // not the queue.
+            let latency = actual.saturating_duration_since(feedback.build_start);
+            self.drain
+                .observe(latency.ticks(), self.config.queue_drain_after);
+        }
 
         if let DegradationPolicy::Adaptive {
             miss_threshold,
@@ -890,6 +1019,13 @@ impl Scheduler {
     /// it only says the frame ran past a pacing boundary, so it takes twice
     /// the misses to raise depth, and a frame that did not overrun is not
     /// a hit. Feedback with neither says nothing, and breaks a run of hits.
+    ///
+    /// A frame shown late that was committed by its deadline is not a miss
+    /// here. Depth moves a frame's target and deadline together, so it gives
+    /// more time only to a frame whose build did not fit; one built in time
+    /// and shown late was held by the presentation pipeline, which
+    /// [`SchedulerConfig::present_latency_alpha`] learns and
+    /// [`SchedulerConfig::queue_drain_after`] drains.
     fn adapt_depth(
         &mut self,
         feedback: &PresentFeedback,
@@ -897,8 +1033,9 @@ impl Scheduler {
         miss_window: u32,
         recovery_threshold: u32,
     ) {
+        let built_late = feedback.submitted_at > feedback.commit_deadline;
         let (missed, strong) = match (feedback.missed_deadline, feedback.pacing_overrun) {
-            (Some(missed), _) => (missed, true),
+            (Some(missed), _) => (missed && built_late, true),
             (None, Some(overran)) => (overran, false),
             (None, None) => {
                 self.consecutive_hits = 0;
@@ -974,6 +1111,7 @@ impl Scheduler {
             recent_misses: self.misses.misses(),
             consecutive_hits: self.consecutive_hits,
             wake_lateness_ticks: self.wake_lateness_ticks,
+            queue_drains: self.drain.drains,
         }
     }
 }
@@ -1709,6 +1847,169 @@ mod tests {
         assert_eq!(plan.frame_interval, fast.saturating_mul(2));
     }
 
+    /// A scheduler with nothing else adapting, so only a drain moves plans.
+    fn drain_scheduler() -> Scheduler {
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
+        config.degradation_policy = DegradationPolicy::Fixed;
+        config.present_latency_alpha = 0.0;
+        Scheduler::new(config)
+    }
+
+    fn drain_plan(sched: &mut Scheduler) -> FramePlan {
+        sched.plan(
+            make_opportunity(PresentationTiming::Predictive, 1_000, Some(2_000), 1_800),
+            FrameDemand::ANIMATION,
+            0,
+        )
+    }
+
+    /// Feedback for a frame planned for 2,000 and shown `refreshes` refreshes
+    /// and `extra` ticks after it.
+    fn shown(sched: &mut Scheduler, refreshes: u64, extra: u64) {
+        sched.observe(&PresentFeedback {
+            present_latency: Duration::ZERO,
+            pipeline_depth: None,
+            work: None,
+            submitted_at: HostTime(1_500),
+            commit_deadline: HostTime(1_800),
+            build_start: HostTime(1_000),
+            expected_present: Some(HostTime(2_000)),
+            actual_present: Some(HostTime(
+                2_000 + refreshes * REFRESH_INTERVAL.ticks() + extra,
+            )),
+            missed_deadline: None,
+            pacing_overrun: None,
+        });
+    }
+
+    #[test]
+    fn frames_kept_a_refresh_late_drain_once() {
+        let mut sched = drain_scheduler();
+        assert_eq!(drain_plan(&mut sched).target_present, Some(HostTime(2_000)));
+        for _ in 0..5 {
+            shown(&mut sched, 0, 0);
+        }
+        // A present missed the cutoff, and every frame after it waits a
+        // refresh behind it.
+        for _ in 0..29 {
+            shown(&mut sched, 1, 0);
+        }
+        assert_eq!(drain_plan(&mut sched).target_present, Some(HostTime(2_000)));
+        shown(&mut sched, 1, 0);
+
+        // The next frame is held back a refresh, once.
+        let held = drain_plan(&mut sched);
+        assert_eq!(
+            held.target_present,
+            Some(HostTime(2_000 + REFRESH_INTERVAL.ticks()))
+        );
+        assert_eq!(
+            held.commit_deadline,
+            HostTime(1_800 + REFRESH_INTERVAL.ticks())
+        );
+        assert_eq!(sched.state().queue_drains, 1);
+        assert_eq!(drain_plan(&mut sched).target_present, Some(HostTime(2_000)));
+
+        // It worked: frames are back on the floor, and a later queue drains
+        // too.
+        shown(&mut sched, 0, 0);
+        for _ in 0..30 {
+            shown(&mut sched, 1, 0);
+        }
+        drain_plan(&mut sched);
+        assert_eq!(sched.state().queue_drains, 2);
+    }
+
+    #[test]
+    fn a_drain_that_does_not_help_makes_the_latency_the_floor() {
+        let mut sched = drain_scheduler();
+        drain_plan(&mut sched);
+        for _ in 0..3 {
+            shown(&mut sched, 0, 0);
+        }
+        for _ in 0..30 {
+            shown(&mut sched, 1, 0);
+        }
+        drain_plan(&mut sched);
+        assert_eq!(sched.state().queue_drains, 1);
+
+        // Still a refresh late through three held frames: the pipeline
+        // changed. No more frames are held back for it.
+        for _ in 0..240 {
+            shown(&mut sched, 1, 0);
+            drain_plan(&mut sched);
+        }
+        assert_eq!(sched.state().queue_drains, 3);
+        // A refresh beyond the new floor drains again.
+        for _ in 0..30 {
+            shown(&mut sched, 2, 0);
+        }
+        drain_plan(&mut sched);
+        assert_eq!(sched.state().queue_drains, 4);
+    }
+
+    #[test]
+    fn one_fast_frame_does_not_lower_the_floor() {
+        let mut sched = drain_scheduler();
+        drain_plan(&mut sched);
+        for _ in 0..3 {
+            shown(&mut sched, 1, 0);
+        }
+        // One frame a refresh sooner than the rest, then the usual latency.
+        shown(&mut sched, 0, 0);
+        for _ in 0..100 {
+            shown(&mut sched, 1, 0);
+        }
+        drain_plan(&mut sched);
+        assert_eq!(sched.state().queue_drains, 0);
+
+        // Two in a row lower it, and the usual latency is a queue again.
+        for _ in 0..2 {
+            shown(&mut sched, 0, 0);
+        }
+        for _ in 0..30 {
+            shown(&mut sched, 1, 0);
+        }
+        drain_plan(&mut sched);
+        assert_eq!(sched.state().queue_drains, 1);
+    }
+
+    #[test]
+    fn less_than_half_a_refresh_late_does_not_drain() {
+        let mut sched = drain_scheduler();
+        drain_plan(&mut sched);
+        for _ in 0..3 {
+            shown(&mut sched, 0, 0);
+        }
+        for _ in 0..100 {
+            shown(&mut sched, 0, REFRESH_INTERVAL.ticks() / 3);
+        }
+        drain_plan(&mut sched);
+        assert_eq!(sched.state().queue_drains, 0);
+    }
+
+    #[test]
+    fn queue_drain_after_zero_turns_draining_off() {
+        let mut config = SchedulerConfig::predictive(Timebase::NANOS);
+        config.degradation_policy = DegradationPolicy::Fixed;
+        config.present_latency_alpha = 0.0;
+        config.queue_drain_after = 0;
+        let mut sched = Scheduler::new(config);
+        drain_plan(&mut sched);
+        for _ in 0..3 {
+            shown(&mut sched, 0, 0);
+        }
+        for _ in 0..100 {
+            shown(&mut sched, 1, 0);
+        }
+        assert_eq!(drain_plan(&mut sched).target_present, Some(HostTime(2_000)));
+        assert_eq!(sched.state().queue_drains, 0);
+        assert_eq!(
+            SchedulerConfig::pacing_only(Timebase::NANOS).queue_drain_after,
+            0
+        );
+    }
+
     #[test]
     fn variable_refresh_without_granularity_uses_stable_divisor() {
         let mut config = SchedulerConfig::predictive(Timebase::NANOS);
@@ -1808,7 +2109,7 @@ mod tests {
             pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
-            commit_deadline: HostTime(u64::MAX),
+            commit_deadline: HostTime(1500),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -1897,7 +2198,7 @@ mod tests {
             pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
-            commit_deadline: HostTime(u64::MAX),
+            commit_deadline: HostTime(1500),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -1919,6 +2220,39 @@ mod tests {
     }
 
     #[test]
+    fn frames_built_in_time_and_shown_late_do_not_raise_depth() {
+        let mut sched = Scheduler::new(SchedulerConfig::predictive(Timebase::NANOS));
+        // Committed by the deadline, shown two refreshes after the target:
+        // the compositor held them, and more depth would not help.
+        let held = PresentFeedback {
+            present_latency: Duration::ZERO,
+            pipeline_depth: None,
+            work: None,
+            submitted_at: HostTime(1500),
+            commit_deadline: HostTime(1800),
+            build_start: HostTime(1000),
+            expected_present: Some(HostTime(2000)),
+            actual_present: Some(HostTime(2000 + 2 * REFRESH_INTERVAL.ticks())),
+            missed_deadline: Some(true),
+            pacing_overrun: None,
+        };
+        for _ in 0..30 {
+            sched.observe(&held);
+        }
+        assert_eq!(sched.pipeline_depth(), 1);
+
+        // Committed after the deadline, they are misses.
+        let built_late = PresentFeedback {
+            submitted_at: HostTime(1900),
+            ..held
+        };
+        for _ in 0..3 {
+            sched.observe(&built_late);
+        }
+        assert_eq!(sched.pipeline_depth(), 2);
+    }
+
+    #[test]
     fn alternating_misses_raise_depth() {
         let mut sched = Scheduler::new(SchedulerConfig::predictive(Timebase::NANOS));
         let miss = PresentFeedback {
@@ -1926,7 +2260,7 @@ mod tests {
             pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
-            commit_deadline: HostTime(u64::MAX),
+            commit_deadline: HostTime(1500),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -1954,7 +2288,7 @@ mod tests {
             pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
-            commit_deadline: HostTime(u64::MAX),
+            commit_deadline: HostTime(1500),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -1984,7 +2318,7 @@ mod tests {
             pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
-            commit_deadline: HostTime(u64::MAX),
+            commit_deadline: HostTime(1500),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -2099,7 +2433,7 @@ mod tests {
             pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
-            commit_deadline: HostTime(u64::MAX),
+            commit_deadline: HostTime(1500),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -2131,7 +2465,7 @@ mod tests {
             pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
-            commit_deadline: HostTime(u64::MAX),
+            commit_deadline: HostTime(1500),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -2208,7 +2542,7 @@ mod tests {
             pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
-            commit_deadline: HostTime(u64::MAX),
+            commit_deadline: HostTime(1500),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,
@@ -2277,7 +2611,7 @@ mod tests {
             pipeline_depth: None,
             work: None,
             submitted_at: HostTime(2000),
-            commit_deadline: HostTime(u64::MAX),
+            commit_deadline: HostTime(1500),
             build_start: HostTime(1000),
             expected_present: None,
             actual_present: None,

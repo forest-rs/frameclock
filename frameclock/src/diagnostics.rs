@@ -794,6 +794,7 @@ mod tests {
                 recent_misses: 1,
                 consecutive_hits: 0,
                 wake_lateness_ticks: 0,
+                queue_drains: 0,
             },
         };
 
