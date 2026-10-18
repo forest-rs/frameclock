@@ -146,6 +146,11 @@ frame's fate later, possibly after later commits, so it submits with
 `FrameSubmission::new(submitted_at, None)`. The `frameclock` README's
 "Submitting Frames" table summarizes the choice.
 
+A configure the host acknowledges with a buffer of the new size cannot wait for
+a frame callback: draw that frame with `FrameDriver::begin_synchronous_frame`,
+and attach and commit it with the acknowledgement; see the `frameclock`
+README's "Synchronous Frames".
+
 ## Timing Model
 
 `now`, `Clock::now`, and all converted timestamps are nanosecond ticks;

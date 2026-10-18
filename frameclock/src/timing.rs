@@ -432,6 +432,10 @@ pub struct FramePlan {
     ///
     /// [`SchedulerConfig::queue_drain_after`]: crate::scheduler::SchedulerConfig::queue_drain_after
     pub held_back: Duration,
+    /// Whether the frame is presented synchronously, outside pacing, as a
+    /// frame for a window resize is; see
+    /// [`FrameDriver::begin_synchronous_frame`](crate::FrameDriver::begin_synchronous_frame).
+    pub synchronous: bool,
     /// Which output this frame targets.
     pub output: OutputId,
     /// Monotonic content-frame counter used for diagnostics and summaries.
@@ -1248,6 +1252,7 @@ mod tests {
             commit_deadline: hints.latest_commit(),
             pipeline_depth: 1,
             held_back: Duration::ZERO,
+            synchronous: false,
             output: OutputId(0),
             frame_index: 0,
         }
