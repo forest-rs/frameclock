@@ -1,0 +1,41 @@
+[package]
+name = "platform_timing_probe"
+description = "Vulkan and Android frameclock API integration probe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+default-run = "platform_timing_probe"
+
+[lints]
+workspace = true
+
+[dependencies]
+frameclock.workspace = true
+frameclock_vulkan = { path = "../../frameclock_vulkan" }
+frameclock_android = { path = "../../frameclock_android" }
+ash = { version = "0.38", default-features = false }
+
+[target.'cfg(target_os = "android")'.dependencies]
+ndk-sys = "0.6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+ash = { version = "0.38", default-features = false, features = [
+  "loaded",
+  "std",
+] }
+winit = "0.30"
+objc2 = "0.6"
+objc2-quartz-core = { version = "0.3", default-features = false, features = [
+  "CABase",
+  "CALayer",
+  "CAMetalLayer",
+  "objc2-metal",
+  "objc2-core-foundation",
+  "objc2-core-graphics",
+] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+  "CFCGTypes",
+] }
