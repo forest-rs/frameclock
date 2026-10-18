@@ -28,9 +28,9 @@
 //! converts them, and `Trace::pacing` judges each frame from them.
 //!
 //! A summary often arrives frames after the frame's work, when the display
-//! reports back. That is fine: frame points carry the frame's number, and the
-//! scheduler state rides on the frame's own deadline point, so both describe
-//! the frame they belong to whenever they are recorded.
+//! reports back. That is fine: frame points and the frame's plan carry the
+//! frame's number, so they describe the frame they belong to whenever they
+//! are recorded.
 //!
 //! # Example
 //!
@@ -72,7 +72,7 @@
 
 use footfall_core::{
     Args, BeginsAt, ClockDesc, ClockReading, ContextHandle, CounterDesc, DropReason, FrameNumber,
-    FramePoint, FramePointKind, FrameStream, TickPeriod, TimingBasis, Unit,
+    FramePlan, FramePoint, FramePointKind, FrameStream, HoldReason, TickPeriod, TimingBasis, Unit,
 };
 use frameclock::diagnostics::{DiagnosticsSink, FrameDropReason, FrameTimingBasis};
 use frameclock::time::Timebase;
@@ -248,9 +248,9 @@ impl Recorder {
     /// | --- | --- | --- | --- |
     /// | `frame_start`, `starts_at_tick` | [`Scheduled`](FramePointKind::Scheduled), beginning at an [`Opportunity`](BeginsAt::Opportunity) or the [`Time`](BeginsAt::Time) | | |
     /// | `predicted_present` | [`Predicted`](FramePointKind::Predicted) | | `presentation_timing` |
-    /// | `commit_deadline` | [`Deadline`](FramePointKind::Deadline) | | the plan's scheduler state, below |
+    /// | `commit_deadline` | [`Deadline`](FramePointKind::Deadline) | | |
     /// | `target_present` | [`Target`](FramePointKind::Target) | | |
-    /// | `sample_time` | [`Sampled`](FramePointKind::Sampled) | | `held_back_ns`, when held back |
+    /// | `sample_time` | [`Sampled`](FramePointKind::Sampled) | | |
     /// | `buffer_wait.requested` | [`BufferRequested`](FramePointKind::BufferRequested) | observed | |
     /// | `buffer_wait.acquired` | [`BufferAcquired`](FramePointKind::BufferAcquired) | observed | |
     /// | `submitted_at` | [`Submitted`](FramePointKind::Submitted) | observed | `work_ns`, when reported |
@@ -258,16 +258,15 @@ impl Recorder {
     /// | `actual_present` | [`Presented`](FramePointKind::Presented) | observed for `ActualPresent`, otherwise estimated | |
     /// | `drop_reason` | [`Dropped`](FramePointKind::Dropped), with the matching [`DropReason`] | | |
     ///
-    /// The deadline point carries the scheduler state the frame was planned
-    /// with, so it stays with that frame however late the summary arrives:
-    /// `pipeline_depth`, `safety_margin_ns`, `frame_interval_ns`, and
-    /// `present_latency_ns`. A frame the scheduler held back a refresh to
-    /// drain a queued one says so on its sampled point, as `held_back_ns`.
-    ///
-    /// A [synchronous](FrameTimingSummary::synchronous) frame, such as one
-    /// for a window resize, was presented when the platform asked for it,
-    /// outside pacing, so it records no prediction, deadline, or target to
-    /// be judged by.
+    /// What the scheduler decided for the frame goes in a [`FramePlan`],
+    /// so it stays with that frame however late the summary arrives:
+    /// `frame_interval` as its interval, `pipeline_depth` as its depth,
+    /// `present_latency` as its latency allowance, `held_back` as a hold to
+    /// [drain the queue](HoldReason::DrainQueue), and
+    /// [`synchronous`](FrameTimingSummary::synchronous) as its kind, with
+    /// `safety_margin_ns` as an arg. A synchronous frame, such as one for a
+    /// window resize, was presented when the platform asked for it, outside
+    /// pacing, so it records no prediction, deadline, or target either.
     ///
     /// Every drop is recorded with its reason, including frames the host
     /// discarded or superseded itself; Footfall's analysis counts only some
@@ -290,6 +289,7 @@ impl Recorder {
             FramePointKind::Scheduled(begins_at),
             summary.frame_start,
         ));
+        footfall_core::frame_plan(&self.plan(number, summary));
         // A synchronous frame was presented when the platform asked for it,
         // outside pacing: it had no deadline or target to be judged by.
         let paced = !summary.synchronous;
@@ -301,35 +301,17 @@ impl Recorder {
                 ),
             ));
         }
-        let plan = Args::none()
-            .with("pipeline_depth", summary.pipeline_depth)
-            .with("safety_margin_ns", self.nanos(summary.safety_margin_ticks))
-            .with(
-                "frame_interval_ns",
-                self.nanos(summary.frame_interval.ticks()),
-            )
-            .with(
-                "present_latency_ns",
-                self.nanos(summary.present_latency.ticks()),
-            );
         if paced {
-            footfall_core::frame_point(
-                &self
-                    .at(number, FramePointKind::Deadline, summary.commit_deadline)
-                    .with_args(plan),
-            );
+            footfall_core::frame_point(&self.at(
+                number,
+                FramePointKind::Deadline,
+                summary.commit_deadline,
+            ));
         }
         if let Some(at) = summary.target_present.filter(|_| paced) {
             footfall_core::frame_point(&self.at(number, FramePointKind::Target, at));
         }
-        let sampled = self.at(number, FramePointKind::Sampled, summary.sample_time);
-        if summary.held_back.is_zero() {
-            footfall_core::frame_point(&sampled);
-        } else {
-            footfall_core::frame_point(&sampled.with_args(
-                Args::none().with("held_back_ns", self.nanos(summary.held_back.ticks())),
-            ));
-        }
+        footfall_core::frame_point(&self.at(number, FramePointKind::Sampled, summary.sample_time));
         if let Some(wait) = summary.buffer_wait {
             for (kind, at) in [
                 (FramePointKind::BufferRequested, wait.requested),
@@ -379,6 +361,29 @@ impl Recorder {
     }
 
     /// Returns frameclock's frame index as a frame of the recorder's stream.
+    /// What the scheduler decided for the frame: its cadence, depth, and
+    /// latency allowance, whether it held the frame back and why, and
+    /// whether the frame was synchronous.
+    fn plan(&self, number: FrameNumber, summary: &FrameTimingSummary) -> FramePlan {
+        let plan = FramePlan::new(number, self.period())
+            .with_interval(summary.frame_interval.ticks())
+            .with_depth(summary.pipeline_depth)
+            .with_latency_allowance(summary.present_latency.ticks())
+            .with_args(
+                Args::none().with("safety_margin_ns", self.nanos(summary.safety_margin_ticks)),
+            );
+        let plan = if summary.held_back.is_zero() {
+            plan
+        } else {
+            plan.with_hold(summary.held_back.ticks(), HoldReason::DrainQueue)
+        };
+        if summary.synchronous {
+            plan.synchronous()
+        } else {
+            plan
+        }
+    }
+
     const fn number(&self, frame_index: u64) -> FrameNumber {
         self.stream.frame(frame_index)
     }

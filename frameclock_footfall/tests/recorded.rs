@@ -6,9 +6,9 @@
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use footfall_core::{
-    Backend, BeginsAt, ClockReading, ContextHandle, CounterDesc, DropReason, FrameNumber,
-    FrameOpportunity, FramePoint, FramePointKind, FrameStream, InstrumentationLevel, LabelValue,
-    MarkerKind, MarkerPhase, TickPeriod, TimingBasis, Unit,
+    Backend, BeginsAt, ClockReading, ContextHandle, CounterDesc, DropReason, FrameKind,
+    FrameNumber, FrameOpportunity, FramePlan, FramePoint, FramePointKind, FrameStream, HoldReason,
+    InstrumentationLevel, LabelValue, MarkerKind, MarkerPhase, TickPeriod, TimingBasis, Unit,
 };
 use frameclock::diagnostics::{
     FrameDropReason, FramePlanEvent, FrameTickEvent, FrameTimingBasis, FrameTimingSummary,
@@ -23,7 +23,7 @@ use frameclock_footfall::{HOST_CLOCK, Recorder};
 /// Mach absolute time on Apple silicon: 125 ns per 3 ticks.
 const MACH: Timebase = Timebase::new(125, 3);
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Seen {
     Marker(MarkerPhase, FrameNumber),
     Sync(u64),
@@ -33,6 +33,44 @@ enum Seen {
     Counter(&'static str, Unit, &'static str, u64),
     /// A frame opportunity: its stream, ticks, interval, and output arg.
     Opportunity(FrameStream, u64, Option<u64>, Option<LabelValue>),
+    /// A frame's plan, in host ticks.
+    Plan(Planned),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Planned {
+    number: FrameNumber,
+    interval: Option<u64>,
+    depth: Option<u8>,
+    latency_allowance: Option<u64>,
+    hold: Option<(u64, HoldReason)>,
+    kind: FrameKind,
+    args: Vec<(&'static str, LabelValue)>,
+}
+
+/// The plan of `summary(number)`: 300 Mach ticks of safety margin are
+/// 12.5 µs.
+fn planned(number: u64) -> Planned {
+    Planned {
+        number: number.into(),
+        interval: Some(3_000),
+        depth: Some(2),
+        latency_allowance: Some(60),
+        hold: None,
+        kind: FrameKind::Paced,
+        args: vec![("safety_margin_ns", LabelValue::Unsigned(12_500))],
+    }
+}
+
+/// The plan recorded, of the only frame recorded.
+fn plan_of(seen: Vec<Seen>) -> Planned {
+    let mut plans = seen.into_iter().filter_map(|seen| match seen {
+        Seen::Plan(plan) => Some(plan),
+        _ => None,
+    });
+    let plan = plans.next().expect("the frame's plan is recorded");
+    assert!(plans.next().is_none(), "once");
+    plan
 }
 
 /// A point of frame `number` of the default stream, with no basis.
@@ -116,6 +154,23 @@ impl Backend for Recording {
                 .find(|arg| arg.key() == "output")
                 .map(|arg| arg.value()),
         ));
+    }
+
+    fn frame_plan(&self, plan: &FramePlan) {
+        assert_eq!(plan.period(), TickPeriod::new(125, 3), "the Mach timebase");
+        self.push(Seen::Plan(Planned {
+            number: plan.number(),
+            interval: plan.interval(),
+            depth: plan.depth(),
+            latency_allowance: plan.latency_allowance(),
+            hold: plan.hold(),
+            kind: plan.kind(),
+            args: plan
+                .args()
+                .iter()
+                .map(|arg| (arg.key(), arg.value()))
+                .collect(),
+        }));
     }
 
     fn counter_add(&self, desc: &'static CounterDesc, _context: ContextHandle, value: u64) {
@@ -231,20 +286,14 @@ fn a_shown_frame_records_every_time_frameclock_knows_in_host_ticks() {
         taken(backend),
         [
             point(1234, FramePointKind::Scheduled(BeginsAt::Time), Some(1_200)),
+            // What the scheduler decided for the frame.
+            Seen::Plan(planned(1234)),
             point(1234, FramePointKind::Predicted, Some(3_900)),
             Seen::Args(vec![(
                 "presentation_timing",
                 LabelValue::StaticStr("predictive")
             )]),
             point(1234, FramePointKind::Deadline, Some(3_250)),
-            // The scheduler state the frame was planned with: 300 Mach
-            // ticks are 12.5 µs.
-            Seen::Args(vec![
-                ("pipeline_depth", LabelValue::Unsigned(2)),
-                ("safety_margin_ns", LabelValue::Unsigned(12_500)),
-                ("frame_interval_ns", LabelValue::Unsigned(125_000)),
-                ("present_latency_ns", LabelValue::Unsigned(2_500)),
-            ]),
             point(1234, FramePointKind::Target, Some(4_000)),
             point(1234, FramePointKind::Sampled, Some(4_000)),
             Seen::Point(
@@ -343,7 +392,7 @@ fn a_frame_the_display_never_showed_is_not_presented() {
 
     let points: Vec<_> = taken(backend)
         .into_iter()
-        .filter(|seen| !matches!(seen, Seen::Args(..)))
+        .filter(|seen| !matches!(seen, Seen::Args(..) | Seen::Plan(..)))
         .collect();
     assert_eq!(
         points,
@@ -373,18 +422,9 @@ fn the_plan_records_its_latency_without_a_scheduler_state_sample() {
     unsampled.scheduler_state = None;
     Recorder::new(MACH).record(&unsampled);
 
-    let plan = taken(backend)
-        .into_iter()
-        .skip_while(|seen| !matches!(seen, Seen::Point(_, FramePointKind::Deadline, ..)))
-        .nth(1);
     assert_eq!(
-        plan,
-        Some(Seen::Args(vec![
-            ("pipeline_depth", LabelValue::Unsigned(2)),
-            ("safety_margin_ns", LabelValue::Unsigned(12_500)),
-            ("frame_interval_ns", LabelValue::Unsigned(125_000)),
-            ("present_latency_ns", LabelValue::Unsigned(2_500)),
-        ])),
+        plan_of(taken(backend)),
+        planned(8),
         "the latency comes from the plan, not the state sampled after feedback"
     );
 }
@@ -396,16 +436,12 @@ fn a_frame_held_back_to_drain_the_queue_says_so() {
     held.held_back = Duration(3_000);
     Recorder::new(MACH).record(&held);
 
-    let sampled = taken(backend)
-        .into_iter()
-        .skip_while(|seen| !matches!(seen, Seen::Point(_, FramePointKind::Sampled, ..)))
-        .nth(1);
     assert_eq!(
-        sampled,
-        Some(Seen::Args(vec![(
-            "held_back_ns",
-            LabelValue::Unsigned(125_000)
-        )])),
+        plan_of(taken(backend)),
+        Planned {
+            hold: Some((3_000, HoldReason::DrainQueue)),
+            ..planned(8)
+        }
     );
 }
 
@@ -416,7 +452,9 @@ fn a_synchronous_frame_records_nothing_to_judge_it_by() {
     resize.synchronous = true;
     Recorder::new(MACH).record(&resize);
 
-    let kinds: Vec<_> = taken(backend)
+    let seen = taken(backend);
+    assert_eq!(plan_of(seen.clone()).kind, FrameKind::Synchronous);
+    let kinds: Vec<_> = seen
         .into_iter()
         .filter_map(|seen| match seen {
             Seen::Point(_, kind, ..) => Some(kind),
