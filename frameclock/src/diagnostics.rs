@@ -94,6 +94,9 @@ pub struct FramePlanEvent {
     ///
     /// See [`FramePlan::present_latency`].
     pub present_latency: Duration,
+    /// How much later the plan put the frame to drain a queued one; see
+    /// [`FramePlan::held_back`].
+    pub held_back: Duration,
     /// Current scheduler safety margin in host-time ticks.
     pub safety_margin_ticks: u64,
 }
@@ -115,6 +118,7 @@ impl FramePlanEvent {
             commit_deadline: plan.commit_deadline,
             pipeline_depth: plan.pipeline_depth,
             present_latency: plan.present_latency,
+            held_back: plan.held_back,
             safety_margin_ticks,
         }
     }
@@ -343,6 +347,9 @@ pub struct FrameTimingSummary {
     ///
     /// [`scheduler_state`]: Self::scheduler_state
     pub present_latency: Duration,
+    /// How much later the plan put the frame, to drain a frame queued in
+    /// the presentation pipeline; see [`FramePlan::held_back`].
+    pub held_back: Duration,
     /// Scheduler safety margin used for the plan, in host-time ticks.
     pub safety_margin_ticks: u64,
     /// Scheduler adaptation state sampled for this frame, if recorded.
@@ -503,6 +510,7 @@ impl FrameTimingSummaryBuilder {
             drop_reason: drop.map(|drop| drop.reason),
             pipeline_depth: plan.pipeline_depth,
             present_latency: plan.present_latency,
+            held_back: plan.held_back,
             safety_margin_ticks: plan.safety_margin_ticks,
             scheduler_state,
         })
@@ -737,6 +745,7 @@ mod tests {
             commit_deadline: HostTime(1_900),
             pipeline_depth: 1,
             present_latency: Duration::ZERO,
+            held_back: Duration::ZERO,
             safety_margin_ticks: 500,
         }
     }
@@ -794,6 +803,7 @@ mod tests {
                 recent_misses: 1,
                 consecutive_hits: 0,
                 wake_lateness_ticks: 0,
+                queue_drains: 0,
             },
         };
 

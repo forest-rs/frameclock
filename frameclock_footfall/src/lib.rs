@@ -221,7 +221,7 @@ impl Recorder {
     /// | `predicted_present` | [`Predicted`](FramePointKind::Predicted) | | `presentation_timing` |
     /// | `commit_deadline` | [`Deadline`](FramePointKind::Deadline) | | the plan's scheduler state, below |
     /// | `target_present` | [`Target`](FramePointKind::Target) | | |
-    /// | `sample_time` | [`Sampled`](FramePointKind::Sampled) | | |
+    /// | `sample_time` | [`Sampled`](FramePointKind::Sampled) | | `held_back_ns`, when held back |
     /// | `submitted_at` | [`Submitted`](FramePointKind::Submitted) | observed | `work_ns`, when reported |
     /// | `expected_present` | [`Expected`](FramePointKind::Expected) | | |
     /// | `actual_present` | [`Presented`](FramePointKind::Presented) | observed for `ActualPresent`, otherwise estimated | |
@@ -230,7 +230,8 @@ impl Recorder {
     /// The deadline point carries the scheduler state the frame was planned
     /// with, so it stays with that frame however late the summary arrives:
     /// `pipeline_depth`, `safety_margin_ns`, `frame_interval_ns`, and
-    /// `present_latency_ns`.
+    /// `present_latency_ns`. A frame the scheduler held back a refresh to
+    /// drain a queued one says so on its sampled point, as `held_back_ns`.
     ///
     /// Every drop is recorded with its reason, including frames the host
     /// discarded or superseded itself; Footfall's analysis counts only some
@@ -270,7 +271,14 @@ impl Recorder {
         if let Some(at) = summary.target_present {
             footfall_core::frame_point(&self.at(number, FramePointKind::Target, at));
         }
-        footfall_core::frame_point(&self.at(number, FramePointKind::Sampled, summary.sample_time));
+        let sampled = self.at(number, FramePointKind::Sampled, summary.sample_time);
+        if summary.held_back.is_zero() {
+            footfall_core::frame_point(&sampled);
+        } else {
+            footfall_core::frame_point(&sampled.with_args(
+                Args::none().with("held_back_ns", self.nanos(summary.held_back.ticks())),
+            ));
+        }
         if let Some(at) = summary.submitted_at {
             let work = match summary.work {
                 Some(work) => Args::none().with("work_ns", self.nanos(work.ticks())),

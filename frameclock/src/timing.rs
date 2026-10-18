@@ -417,6 +417,12 @@ pub struct FramePlan {
     ///
     /// [`SchedulerConfig::present_latency_alpha`]: crate::scheduler::SchedulerConfig::present_latency_alpha
     pub present_latency: Duration,
+    /// How much later this frame is planned than it would otherwise be, to
+    /// drain a frame queued in the presentation pipeline: a refresh, or zero
+    /// ([`SchedulerConfig::queue_drain_after`]).
+    ///
+    /// [`SchedulerConfig::queue_drain_after`]: crate::scheduler::SchedulerConfig::queue_drain_after
+    pub held_back: Duration,
     /// Which output this frame targets.
     pub output: OutputId,
     /// Monotonic content-frame counter used for diagnostics and summaries.
@@ -691,6 +697,14 @@ pub struct PresentFeedback {
     pub commit_deadline: HostTime,
     /// When the frame began building (for build cost estimation).
     pub build_start: HostTime,
+    /// Whether the frame started at a tick, as its plan's
+    /// [`FramePlan::starts_at_tick`].
+    ///
+    /// The time from such a frame's build start to when it is shown is
+    /// steady. A frame that starts when planned starts as late as its
+    /// learned margin allows, which moves with its build cost, so that
+    /// latency is measured from its commit deadline instead.
+    pub starts_at_tick: bool,
     /// The presentation latency the plan was made with, carried back so
     /// the scheduler can correct it.
     pub present_latency: Duration,
@@ -749,6 +763,7 @@ impl PresentFeedback {
         );
         feedback.present_latency = plan.present_latency;
         feedback.pipeline_depth = Some(plan.pipeline_depth);
+        feedback.starts_at_tick = plan.starts_at_tick;
         // A frame shown at the refresh it was planned for is on time, even
         // though the timestamp for that refresh lands a little after the
         // target: only the next refresh is a real miss. Platforms that
@@ -846,6 +861,7 @@ impl PresentFeedback {
             submitted_at,
             commit_deadline: hints.latest_commit(),
             build_start,
+            starts_at_tick: hints.starts_at_tick(),
             present_latency: Duration::ZERO,
             pipeline_depth: None,
             work: None,
@@ -1057,6 +1073,7 @@ mod tests {
             presentation_timing: hints.presentation_timing(),
             commit_deadline: hints.latest_commit(),
             pipeline_depth: 1,
+            held_back: Duration::ZERO,
             output: OutputId(0),
             frame_index: 0,
         }

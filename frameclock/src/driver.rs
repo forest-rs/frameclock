@@ -1913,6 +1913,7 @@ mod tests {
             submitted_at: HostTime(20),
             commit_deadline: HostTime(u64::MAX),
             build_start: HostTime(10),
+            starts_at_tick: false,
             expected_present: None,
             actual_present: None,
             missed_deadline: None,
