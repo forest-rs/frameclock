@@ -18,6 +18,8 @@ Without an installed Footfall backend every call does nothing.
 
 ```text
 platform tick       -> Recorder::sync(now)
+FrameOpportunity    -> Recorder::opportunity(&opportunity)
+                    -> FrameDriver::begin_frame(opportunity)
 FrameBeginResult::Ready(frame)
                     -> Recorder::begin_frame(&frame)
                     -> build frame
@@ -25,6 +27,12 @@ FrameBeginResult::Ready(frame)
                     -> FrameDriver::submit_frame() / report_frame() / ...
 FrameTimingSummary  -> Recorder::record(&summary)
 ```
+
+Record every opportunity the platform offers, including those at which no
+frame starts. A frame whose hints start it at a tick is recorded as
+scheduled to begin at the first opportunity from its `frame_start`, so
+Footfall can tell a frame the program started late from one whose tick the
+platform skipped, and count the ticks skipped.
 
 Pass every summary the driver returns, including the ones that arrive frames
 later from `report_frame` or `FrameBegin::resolved_feedback`. Frame points
@@ -37,6 +45,7 @@ known at begin, but recording them then would only duplicate it.
 | `FrameTimingSummary` | Footfall |
 | --- | --- |
 | `frame_index` | the number on the frame markers and every frame point, in the recorder's `FrameStream` |
+| `frame_start`, `starts_at_tick` | `FramePointKind::Scheduled`, beginning at `BeginsAt::Opportunity` for a frame that starts at a tick, otherwise `BeginsAt::Time` |
 | `predicted_present` | `FramePointKind::Predicted`, with a `presentation_timing` arg |
 | `commit_deadline` | `FramePointKind::Deadline`, with the plan's scheduler state as args |
 | `target_present` | `FramePointKind::Target` |
@@ -71,7 +80,8 @@ with when frames were shown.
 
 ## Footfall Version
 
-This crate uses Footfall 0.1.
+This crate uses Footfall from git, pinned to a commit with the changes that will
+be Footfall 0.2, until that release is published.
 
 ## Minimum Supported Rust Version (MSRV)
 
