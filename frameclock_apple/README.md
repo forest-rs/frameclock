@@ -28,10 +28,14 @@ CADisplayLink / CVDisplayLink -> FrameTick
 
 Use `CaDisplayLink` or `CvDisplayLink` when an application wants this crate
 to create an Apple display-link tick source. The default `ca-display-link`
-feature exposes `CaDisplayLink`, a main-thread `CADisplayLink` wrapper. The
-`cv-display-link` feature exposes `CvDisplayLink`, a legacy macOS
-`CVDisplayLink` wrapper. Both take an `FnMut` callback and call it on the main
-thread, so it can own the host's scheduler state.
+feature exposes `CaDisplayLink`, a `CADisplayLink` wrapper that ticks on the
+run loop of the thread that starts it: the main thread, or a render thread
+of the host's. The `cv-display-link` feature exposes `CvDisplayLink`, a
+legacy macOS `CVDisplayLink` wrapper, whose callback runs on the main thread
+(`CvDisplayLink::new`) or on Core Video's own thread
+(`CvDisplayLink::on_link_thread`). The callback can own the host's scheduler
+state on whichever thread it runs; see
+[Rendering Off the Main Thread](#rendering-off-the-main-thread).
 
 Use `FrameDriver` when an application wants retained frame lifecycle state:
 pending demand, queued frame-start plans, stronger-demand preemption, submission
@@ -43,14 +47,12 @@ Metal.
 ```rust,ignore
 use frameclock::{FrameBeginResult, FrameDemand, FrameDriver, OutputId};
 use frameclock_apple::CaDisplayLink;
-use objc2::MainThreadMarker;
 
-// The display-link callback runs on the main thread and may own the driver.
+// The display-link callback runs on this thread and may own the driver.
 let mut driver = FrameDriver::new(frameclock_apple::scheduler_config());
 // 60 Hz in Mach ticks, refined from each tick's refresh interval.
 let display_timing = frameclock_apple::default_display_timing();
 let output = OutputId(0);
-let mtm = MainThreadMarker::new().unwrap();
 
 let display_link = CaDisplayLink::new(
     move |tick| {
@@ -84,7 +86,6 @@ let display_link = CaDisplayLink::new(
         }
     },
     output,
-    mtm,
 );
 
 display_link.start();
@@ -128,9 +129,11 @@ tracing, or external diagnostics.
 `prev_actual_present`, except on the first tick after the link is created,
 paused, or stopped. `CVDisplayLink` ticks carry the output host time as
 `predicted_present` and the display's refresh period as `refresh_interval`.
-Their `now` is read when the tick reaches the main thread, so time spent
-waiting for a busy main thread is not counted as time the host still has. A
-tick overtaken by a newer one while it waits is dropped.
+For `CvDisplayLink::new`, `now` is read when the tick reaches the main
+thread, so time spent waiting for a busy main thread is not counted as time
+the host still has, and a tick overtaken by a newer one while it waits is
+dropped. For `CvDisplayLink::on_link_thread`, it is read on Core Video's
+thread as the tick arrives.
 
 Every `Duration` and `DisplayTiming` passed alongside these ticks is in Mach
 ticks too. Convert nanosecond values with `Duration::from_nanos(nanos,
@@ -185,8 +188,9 @@ if let FrameBeginResult::Wait(FrameWait::Until(at)) = result {
 ```
 
 `wake_at` runs its closure on the main thread, so the closure can own
-main-thread state, which `DispatchQueue::after` does not allow. It uses a
-strict dispatch timer with no leeway: on a 120 Hz Mac it fired a median of
+main-thread state, which `DispatchQueue::after` does not allow. A host
+rendering on a thread of its own keeps the default hints, which start frames
+at its link's ticks. `wake_at` uses a strict dispatch timer with no leeway: on a 120 Hz Mac it fired a median of
 under 0.1 ms late, where `DispatchQueue::after` fired about a millisecond late
 over a few milliseconds. The driver learns how late wakes come and starts
 frames that much earlier; run live, frames started about 5 ms after each 120 Hz
@@ -230,17 +234,21 @@ reached the screen this long after their callbacks:
 | Link | Callback to on screen | Why |
 |---|---|---|
 | `CaDisplayLink`, presenting `nextDrawable` at once | 25 ms, 3 refreshes | the lowest |
-| `CvDisplayLink`, the same way | 28 or 37 ms | ticks wait for the main queue |
+| `CvDisplayLink`, the same way | 20 ms, or 28 or 37 ms with frames queued | see below |
 | `CaMetalDisplayLink` | 41.5 ms, 5 refreshes | planned by macOS |
 
-For an interactive window, use `CaDisplayLink` and present as soon as the
-frame is rendered. `CaMetalDisplayLink` hands each update its drawable, a
-hard deadline, and a target, but in a window macOS plans that target five
-refreshes ahead whatever `preferred_frame_latency` asks for. `CvDisplayLink`
-ticks hop to the main queue, and where they land against the compositor's
-cutoff decides whether a frame waits an extra refresh. The layer's setup,
-layer-hosting or layer-backed and at backing scale or not, made no
-difference.
+For an interactive window, use `CaDisplayLink` or `CvDisplayLink` and present
+as soon as the frame is rendered. `CaMetalDisplayLink` hands each update its
+drawable, a hard deadline, and a target, but in a window macOS plans that
+target five refreshes ahead whatever `preferred_frame_latency` asks for. The
+layer's setup, layer-hosting or layer-backed and at backing scale or not, made
+no difference.
+
+`CvDisplayLink`'s frames reach the screen soonest, 20 ms after its callbacks,
+but its first frames are often queued behind one another, at 28 or 37 ms, and
+stay there. Reported as below, two of three runs drained to 20 ms. A run
+queued from its first frame never sees the lower latency, so nothing tells
+the scheduler there is a queue to drain.
 
 On the `CaDisplayLink` path, a present that misses the compositor's cutoff
 leaves a frame queued, and every later frame is shown a refresh later until
@@ -258,6 +266,41 @@ drawable queue the same way: frames took 33 to 40 ms.
 `nextDrawable` blocks when every drawable is in use. Read the time before and
 after it and pass both with `FrameSubmission::with_buffer_wait`, so the
 scheduler does not count the wait as the frame's work.
+
+## Rendering Off the Main Thread
+
+A display link on the main thread ticks between the application's event
+handling, layout, and anything else the main thread does, and a tick that
+arrives while the main thread is busy waits for it or is dropped. A host that
+renders on a thread of its own avoids that:
+
+- Create and start a `CaDisplayLink` on the render thread, and run that
+  thread's run loop, such as with `NSRunLoop::currentRunLoop().run()`. The
+  link ticks there. It is not `Send`, so it and its callback stay on that
+  thread.
+- Or make a `CvDisplayLink` with `on_link_thread`: its callback, which must be
+  `Send`, runs on Core Video's thread as each tick arrives.
+
+Either way, the callback owns the `FrameDriver` and the renderer, and presents
+from that thread. Give a render thread of the host's user-interactive quality
+of service, with `pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,
+0)`. With the main thread busy as below, two of five runs on a render thread
+without it lost frames or stayed a refresh late, and none of eight with it.
+
+On a 120 Hz Mac, rendering 1 ms of work into a small window for four seconds,
+with each drawable's `presentedTime` reported and the main thread busy for 12
+ms of every 50:
+
+| Link | Refreshes skipped on screen | Callback to on screen |
+|---|---|---|
+| `CaDisplayLink` on the main thread | 80 to 151 of 480 | 25 ms |
+| `CaDisplayLink` on a render thread | 0 to 2 | 25 ms |
+| `CvDisplayLink::new` | 1 to 64 | 20 to 28 ms |
+| `CvDisplayLink::on_link_thread` | 1 to 9 | 20 ms |
+
+With the main thread idle, every link skipped 9 refreshes or fewer. A render
+thread does not help a frame that blocks it, such as in `nextDrawable`: report
+that wait with `FrameSubmission::with_buffer_wait`.
 
 ## Metal Display Link
 
@@ -351,7 +394,7 @@ full screen about 16 ms, two refreshes. Either way frames were shown within
   default.
 - `cv-display-link`: enables legacy `CVDisplayLink` support on macOS, for
   hosts that need a Core Video display link. Its ticks are forwarded from the
-  Core Video thread to the main thread.
+  Core Video thread to the main thread, or run on Core Video's thread.
 - `metal-display-link`: enables `CAMetalDisplayLink` support, for Metal
   renderers that want each frame's drawable, deadline, and target together.
 

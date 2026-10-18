@@ -6,12 +6,13 @@
 use alloc::boxed::Box;
 use core::cell::{Cell, RefCell};
 use core::fmt;
+use core::marker::PhantomData;
 
 use frameclock::time::Timebase;
 use frameclock::{DisplayTiming, Duration, FrameTick, HostTime, OutputId};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{AnyThread, DefinedClass, define_class, msg_send, sel};
 use objc2_foundation::{NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes};
 use objc2_quartz_core::{CACurrentMediaTime, CADisplayLink as CADisplayLinkRaw, CAFrameRateRange};
 
@@ -26,7 +27,6 @@ struct DisplayLinkTargetIvars {
 
 define_class! {
     #[unsafe(super(NSObject))]
-    #[thread_kind = MainThreadOnly]
     #[name = "FrameclockDisplayLinkTarget"]
     #[ivars = DisplayLinkTargetIvars]
     struct DisplayLinkTarget;
@@ -42,12 +42,12 @@ define_class! {
 }
 
 impl DisplayLinkTarget {
-    fn new<F>(callback: F, output: OutputId, mtm: MainThreadMarker) -> Retained<Self>
+    fn new<F>(callback: F, output: OutputId) -> Retained<Self>
     where
         F: FnMut(FrameTick) + 'static,
     {
         let tb = mach_time::timebase();
-        let this = mtm.alloc::<Self>().set_ivars(DisplayLinkTargetIvars {
+        let this = Self::alloc().set_ivars(DisplayLinkTargetIvars {
             callback: RefCell::new(Box::new(callback)),
             has_previous_timestamp: Cell::new(false),
             output,
@@ -101,10 +101,19 @@ impl DisplayLinkTarget {
 }
 
 /// Safe wrapper around `CADisplayLink` that produces [`FrameTick`] events on
-/// the main thread.
+/// the thread that starts it.
+///
+/// The link ticks on the run loop of the thread that calls
+/// [`start`](Self::start), which must run that run loop. On the main thread,
+/// the application's event loop does. On a render thread of its own, the
+/// link's ticks no longer wait behind the main thread's event handling,
+/// layout, or a `nextDrawable` blocked there. A link is not `Send`, so it
+/// stays on the thread that created it, and so does its callback.
 pub struct CaDisplayLink {
     raw: Retained<CADisplayLinkRaw>,
     target: Retained<DisplayLinkTarget>,
+    run_loop: RefCell<Option<Retained<NSRunLoop>>>,
+    _not_send: PhantomData<*const ()>,
 }
 
 impl fmt::Debug for CaDisplayLink {
@@ -141,14 +150,14 @@ impl CaDisplayLink {
     /// Creates a new display link with the given callback.
     ///
     /// The link is created but not started. Call [`start`](Self::start) to
-    /// begin receiving ticks on the main run loop. A tick that arrives while
-    /// the callback is still running, such as from a nested run loop inside
-    /// it, is dropped.
-    pub fn new<F>(callback: F, output: OutputId, mtm: MainThreadMarker) -> Self
+    /// begin receiving ticks on this thread's run loop. A tick that arrives
+    /// while the callback is still running, such as from a nested run loop
+    /// inside it, is dropped.
+    pub fn new<F>(callback: F, output: OutputId) -> Self
     where
         F: FnMut(FrameTick) + 'static,
     {
-        let target = DisplayLinkTarget::new(callback, output, mtm);
+        let target = DisplayLinkTarget::new(callback, output);
 
         let raw = unsafe {
             CADisplayLinkRaw::displayLinkWithTarget_selector(
@@ -157,31 +166,44 @@ impl CaDisplayLink {
             )
         };
 
-        Self { raw, target }
-    }
-
-    /// Starts the display link by adding it to the main run loop.
-    ///
-    /// The link is added in the common run-loop modes, so it keeps ticking
-    /// while the run loop tracks events, such as during a live window resize
-    /// or an open menu.
-    pub fn start(&self) {
-        let run_loop = NSRunLoop::mainRunLoop();
-        unsafe {
-            self.raw
-                .addToRunLoop_forMode(&run_loop, NSRunLoopCommonModes);
+        Self {
+            raw,
+            target,
+            run_loop: RefCell::new(None),
+            _not_send: PhantomData,
         }
     }
 
-    /// Stops the display link by removing it from the main run loop.
+    /// Starts the display link on the current thread's run loop.
+    ///
+    /// The link is added in the common run-loop modes, so on the main
+    /// thread it keeps ticking while the run loop tracks events, such as
+    /// during a live window resize or an open menu. Starting an already
+    /// started link does nothing.
+    pub fn start(&self) {
+        let mut run_loop = self.run_loop.borrow_mut();
+        if run_loop.is_some() {
+            return;
+        }
+        let current = NSRunLoop::currentRunLoop();
+        unsafe {
+            self.raw
+                .addToRunLoop_forMode(&current, NSRunLoopCommonModes);
+        }
+        *run_loop = Some(current);
+    }
+
+    /// Stops the display link by removing it from the run loop it was
+    /// started on.
     ///
     /// The first tick after the link starts again reports no
     /// [`FrameTick::prev_actual_present`].
     pub fn stop(&self) {
-        let run_loop = NSRunLoop::mainRunLoop();
-        unsafe {
-            self.raw
-                .removeFromRunLoop_forMode(&run_loop, NSRunLoopCommonModes);
+        if let Some(run_loop) = self.run_loop.borrow_mut().take() {
+            unsafe {
+                self.raw
+                    .removeFromRunLoop_forMode(&run_loop, NSRunLoopCommonModes);
+            }
         }
         self.target.forget_previous_timestamp();
     }
