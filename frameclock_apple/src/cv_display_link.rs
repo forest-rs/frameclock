@@ -5,13 +5,13 @@
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
-use core::cell::RefCell;
+use core::cell::{RefCell, UnsafeCell};
 use core::ffi::c_void;
 use core::fmt;
 use core::marker::PhantomData;
 use core::pin::Pin;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use dispatch2::{DispatchQueue, MainThreadBound};
 use frameclock::time::Timebase;
@@ -87,29 +87,71 @@ impl TickGate {
     }
 }
 
+/// A callback that runs on the display link's own thread.
+struct OnLinkThread {
+    callback: UnsafeCell<Box<dyn FnMut(FrameTick) + Send>>,
+    /// Whether a tick is running the callback, so no other one does.
+    running: AtomicBool,
+    /// Set when the link is dropped, so no tick runs the callback after.
+    closed: AtomicBool,
+}
+
+impl OnLinkThread {
+    fn run(&self, tick: FrameTick) {
+        if self.running.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if !self.closed.load(Ordering::SeqCst) {
+            // SAFETY: `running` was false and is now true, so this is the
+            // only access until it is cleared below.
+            let callback = unsafe { &mut *self.callback.get() };
+            callback(tick);
+        }
+        self.running.store(false, Ordering::SeqCst);
+    }
+
+    /// Stops ticks from running the callback, waiting for one that is.
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        while self.running.load(Ordering::SeqCst) {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+/// Where the callback runs.
+enum Delivery {
+    /// On the main thread, from the main dispatch queue.
+    MainThread(Arc<Shared>),
+    /// On the display link's own thread.
+    LinkThread(OnLinkThread),
+}
+
 struct CallbackState {
-    shared: Arc<Shared>,
+    delivery: Delivery,
     output: OutputId,
     timebase: Timebase,
 }
 
-/// Safe wrapper around `CVDisplayLink` that produces [`FrameTick`] events on
-/// the main thread.
+/// Safe wrapper around `CVDisplayLink` that produces [`FrameTick`] events.
 ///
-/// Core Video calls the display link on its own thread. Each tick is
-/// dispatched to the main queue and passed to the callback there, so the
-/// callback can own main-thread state without `Send` or `Sync`.
-///
-/// A busy main thread delays that dispatch, so a tick's
+/// Core Video calls the display link on its own thread. A link made with
+/// [`new`](Self::new) dispatches each tick to the main queue and passes it to
+/// the callback there, so the callback can own main-thread state without
+/// `Send` or `Sync`. A busy main thread delays that dispatch, so a tick's
 /// [`FrameTick::now`] is read when it reaches the main thread, not when
 /// Core Video produced it, and a prediction that has passed by then is
 /// stale. Ticks that a newer tick overtook while waiting are dropped, and so
 /// are ticks still waiting when the link is stopped or dropped.
+///
+/// A link made with [`on_link_thread`](Self::on_link_thread) runs the
+/// callback on Core Video's thread instead, as soon as the tick arrives, for
+/// a host that renders there. Nothing waits for the main thread.
 pub struct CvDisplayLink {
     raw: CFRetained<CVDisplayLinkRaw>,
     state: Pin<Box<CallbackState>>,
-    /// The callback must be dropped on the main thread, so the link stays
-    /// there too.
+    /// A main-thread callback must be dropped on the main thread, so the
+    /// link stays on the thread that made it.
     _main_thread: PhantomData<MainThreadMarker>,
 }
 
@@ -148,10 +190,6 @@ impl CvDisplayLink {
     /// # Errors
     ///
     /// Returns [`CvDisplayLinkError`] if the underlying `CoreVideo` calls fail.
-    #[expect(
-        deprecated,
-        reason = "CVDisplayLink API is deprecated by Apple but still functional"
-    )]
     pub fn new<F>(
         callback: F,
         output: OutputId,
@@ -161,11 +199,50 @@ impl CvDisplayLink {
         F: FnMut(FrameTick) + 'static,
     {
         let callback: Box<dyn FnMut(FrameTick)> = Box::new(callback);
-        let state = Box::pin(CallbackState {
-            shared: Arc::new(Shared {
+        Self::with_delivery(
+            Delivery::MainThread(Arc::new(Shared {
                 callback: MainThreadBound::new(RefCell::new(callback), mtm),
                 gate: TickGate::default(),
+            })),
+            output,
+        )
+    }
+
+    /// Creates a new display link targeting all active displays, whose
+    /// callback runs on Core Video's display-link thread.
+    ///
+    /// The link is created but not started. Once it is started, `callback`
+    /// receives each tick on Core Video's thread as soon as it arrives, with
+    /// [`FrameTick::now`] read there. A host that renders on that thread,
+    /// owning its driver and renderer there, avoids the wait for the main
+    /// queue that [`new`](Self::new)'s ticks take. A tick that arrives while
+    /// the callback is still running is dropped, and none runs it once the
+    /// link is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CvDisplayLinkError`] if the underlying `CoreVideo` calls fail.
+    pub fn on_link_thread<F>(callback: F, output: OutputId) -> Result<Self, CvDisplayLinkError>
+    where
+        F: FnMut(FrameTick) + Send + 'static,
+    {
+        Self::with_delivery(
+            Delivery::LinkThread(OnLinkThread {
+                callback: UnsafeCell::new(Box::new(callback)),
+                running: AtomicBool::new(false),
+                closed: AtomicBool::new(false),
             }),
+            output,
+        )
+    }
+
+    #[expect(
+        deprecated,
+        reason = "CVDisplayLink API is deprecated by Apple but still functional"
+    )]
+    fn with_delivery(delivery: Delivery, output: OutputId) -> Result<Self, CvDisplayLinkError> {
+        let state = Box::pin(CallbackState {
+            delivery,
             output,
             timebase: crate::mach_time::timebase(),
         });
@@ -223,8 +300,11 @@ impl CvDisplayLink {
     )]
     pub fn stop(&self) -> Result<(), CvDisplayLinkError> {
         let ret = self.raw.stop();
-        // Ticks already queued for the main thread are from before the stop.
-        self.state.shared.gate.invalidate();
+        if let Delivery::MainThread(shared) = &self.state.delivery {
+            // Ticks already queued for the main thread are from before the
+            // stop.
+            shared.gate.invalidate();
+        }
         if ret != kCVReturnSuccess {
             return Err(CvDisplayLinkError::StopFailed(ret));
         }
@@ -276,8 +356,11 @@ impl Drop for CvDisplayLink {
         if self.raw.is_running() {
             let _ = self.raw.stop();
         }
-        // Queued ticks keep the callback alive but must not run it.
-        self.state.shared.gate.invalidate();
+        match &self.state.delivery {
+            // Queued ticks keep the callback alive but must not run it.
+            Delivery::MainThread(shared) => shared.gate.invalidate(),
+            Delivery::LinkThread(on_link_thread) => on_link_thread.close(),
+        }
     }
 }
 
@@ -306,7 +389,19 @@ unsafe extern "C-unwind" fn display_link_callback(
     );
 
     let output = state.output;
-    let shared = Arc::clone(&state.shared);
+    let shared = match &state.delivery {
+        Delivery::MainThread(shared) => Arc::clone(shared),
+        Delivery::LinkThread(on_link_thread) => {
+            on_link_thread.run(FrameTick {
+                now: crate::mach_time::now(),
+                predicted_present,
+                refresh_interval,
+                output,
+                prev_actual_present: None,
+            });
+            return kCVReturnSuccess;
+        }
+    };
     let number = shared.gate.dispatch();
     DispatchQueue::main().exec_async(move || {
         if !shared.gate.is_current(number) {
@@ -365,6 +460,49 @@ mod tests {
     use super::*;
 
     const REFRESH_VALID: u64 = CVTimeStampFlags::VideoRefreshPeriodValid.0;
+
+    fn tick() -> FrameTick {
+        FrameTick {
+            now: HostTime(1),
+            predicted_present: None,
+            refresh_interval: None,
+            output: OutputId(0),
+            prev_actual_present: None,
+        }
+    }
+
+    fn counting(count: &Arc<AtomicU64>) -> OnLinkThread {
+        let count = Arc::clone(count);
+        OnLinkThread {
+            callback: UnsafeCell::new(Box::new(move |_| {
+                count.fetch_add(1, Ordering::Relaxed);
+            })),
+            running: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    #[test]
+    fn a_link_thread_tick_runs_the_callback_until_the_link_closes() {
+        let count = Arc::new(AtomicU64::new(0));
+        let on_link_thread = counting(&count);
+        on_link_thread.run(tick());
+        on_link_thread.run(tick());
+        assert_eq!(count.load(Ordering::Relaxed), 2);
+
+        on_link_thread.close();
+        on_link_thread.run(tick());
+        assert_eq!(count.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn a_link_thread_tick_skips_a_callback_already_running() {
+        let count = Arc::new(AtomicU64::new(0));
+        let on_link_thread = counting(&count);
+        on_link_thread.running.store(true, Ordering::SeqCst);
+        on_link_thread.run(tick());
+        assert_eq!(count.load(Ordering::Relaxed), 0);
+    }
 
     #[test]
     fn only_the_newest_queued_tick_runs() {
