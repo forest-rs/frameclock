@@ -1908,6 +1908,7 @@ mod tests {
         let mut driver = driver();
         driver.observe(&PresentFeedback {
             present_latency: Duration::ZERO,
+            pipeline_depth: None,
             work: None,
             submitted_at: HostTime(20),
             commit_deadline: HostTime(u64::MAX),

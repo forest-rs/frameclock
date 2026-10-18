@@ -176,7 +176,7 @@ fn summary(frame_index: u64) -> FrameTimingSummary {
                 pipeline_depth: 2,
                 present_latency_ticks: 30,
                 safety_margin_ticks: 300,
-                consecutive_misses: 1,
+                recent_misses: 1,
                 consecutive_hits: 0,
                 wake_lateness_ticks: 0,
             },
