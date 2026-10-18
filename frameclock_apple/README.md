@@ -255,6 +255,10 @@ timestamps instead, which miss the queue.
 Presenting faster than the display refreshes, such as from a timer, fills the
 drawable queue the same way: frames took 33 to 40 ms.
 
+`nextDrawable` blocks when every drawable is in use. Read the time before and
+after it and pass both with `FrameSubmission::with_buffer_wait`, so the
+scheduler does not count the wait as the frame's work.
+
 ## Metal Display Link
 
 With the `metal-display-link` feature, `CaMetalDisplayLink` drives a

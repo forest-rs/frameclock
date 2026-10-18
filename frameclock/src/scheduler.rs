@@ -1073,7 +1073,7 @@ impl Scheduler {
         miss_window: u32,
         recovery_threshold: u32,
     ) {
-        let built_late = feedback.submitted_at > feedback.commit_deadline;
+        let built_late = feedback.built_late();
         let (missed, strong) = match (feedback.missed_deadline, feedback.pacing_overrun) {
             (Some(missed), _) => (missed && built_late, true),
             (None, Some(overran)) => (overran, false),
@@ -1317,6 +1317,7 @@ mod tests {
             sched.observe(&PresentFeedback {
                 present_latency: Duration::ZERO,
                 pipeline_depth: None,
+                buffer_wait: None,
                 submitted_at: HostTime(1500),
                 commit_deadline: plan.commit_deadline,
                 build_start: HostTime(1000),
@@ -1418,6 +1419,7 @@ mod tests {
             sched.observe(&PresentFeedback {
                 present_latency: Duration::ZERO,
                 pipeline_depth: None,
+                buffer_wait: None,
                 submitted_at: HostTime(1500),
                 commit_deadline: HostTime(u64::MAX),
                 build_start: HostTime(1000),
@@ -1495,6 +1497,7 @@ mod tests {
         let feedback = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(1_200),
             commit_deadline: HostTime(u64::MAX),
@@ -1526,6 +1529,7 @@ mod tests {
         let feedback = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(1_200),
             commit_deadline: HostTime(u64::MAX),
@@ -1665,6 +1669,7 @@ mod tests {
         let feedback = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(21_000_000),
             commit_deadline: HostTime(u64::MAX),
@@ -1704,6 +1709,7 @@ mod tests {
         let feedback = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(11_000_000),
             commit_deadline: HostTime(u64::MAX),
@@ -1738,6 +1744,7 @@ mod tests {
         sched.observe(&PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(1_000_000 + build),
             commit_deadline: HostTime(u64::MAX),
@@ -1940,6 +1947,7 @@ mod tests {
         sched.observe(&PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(1_500),
             commit_deadline: HostTime(1_800),
@@ -2071,6 +2079,7 @@ mod tests {
         sched.observe(&PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(commit_deadline - 100),
             commit_deadline: HostTime(commit_deadline),
@@ -2214,6 +2223,7 @@ mod tests {
         let feedback = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(13_000_000),
             commit_deadline: HostTime(u64::MAX),
@@ -2259,6 +2269,7 @@ mod tests {
         let feedback = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(13_000_000),
             commit_deadline: HostTime(u64::MAX),
@@ -2304,6 +2315,7 @@ mod tests {
         let feedback = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(2000),
             commit_deadline: HostTime(1500),
@@ -2394,6 +2406,7 @@ mod tests {
         let miss = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(2000),
             commit_deadline: HostTime(1500),
@@ -2426,6 +2439,7 @@ mod tests {
         let held = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(1500),
             commit_deadline: HostTime(1800),
@@ -2453,11 +2467,50 @@ mod tests {
     }
 
     #[test]
+    fn frames_late_only_by_waiting_for_a_buffer_do_not_raise_depth() {
+        let mut sched = Scheduler::new(SchedulerConfig::predictive(Timebase::NANOS));
+        // Submitted 100 after the deadline, having waited 300 for a buffer:
+        // the queue was full, and a deeper one would only fill further.
+        let waited = PresentFeedback {
+            present_latency: Duration::ZERO,
+            pipeline_depth: None,
+            buffer_wait: Some(crate::timing::BufferWait {
+                requested: HostTime(1200),
+                acquired: HostTime(1500),
+            }),
+            work: None,
+            submitted_at: HostTime(1900),
+            commit_deadline: HostTime(1800),
+            build_start: HostTime(1000),
+            starts_at_tick: false,
+            expected_present: Some(HostTime(2000)),
+            actual_present: Some(HostTime(2000 + REFRESH_INTERVAL.ticks())),
+            missed_deadline: Some(true),
+            pacing_overrun: None,
+        };
+        for _ in 0..30 {
+            sched.observe(&waited);
+        }
+        assert_eq!(sched.pipeline_depth(), 1);
+
+        // Late by more than the wait, the frame's own work made it late.
+        let slow = PresentFeedback {
+            submitted_at: HostTime(2200),
+            ..waited
+        };
+        for _ in 0..3 {
+            sched.observe(&slow);
+        }
+        assert_eq!(sched.pipeline_depth(), 2);
+    }
+
+    #[test]
     fn alternating_misses_raise_depth() {
         let mut sched = Scheduler::new(SchedulerConfig::predictive(Timebase::NANOS));
         let miss = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(2000),
             commit_deadline: HostTime(1500),
@@ -2487,6 +2540,7 @@ mod tests {
         let miss = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(2000),
             commit_deadline: HostTime(1500),
@@ -2518,6 +2572,7 @@ mod tests {
         let miss = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(2000),
             commit_deadline: HostTime(1500),
@@ -2536,6 +2591,7 @@ mod tests {
         // Frames planned at depth 1 were still in flight when it changed.
         let in_flight = PresentFeedback {
             pipeline_depth: Some(1),
+            buffer_wait: None,
             ..miss
         };
         for _ in 0..3 {
@@ -2546,6 +2602,7 @@ mod tests {
         // Frames planned at depth 2 count.
         let planned = PresentFeedback {
             pipeline_depth: Some(2),
+            buffer_wait: None,
             ..miss
         };
         for _ in 0..3 {
@@ -2564,6 +2621,7 @@ mod tests {
         let hit = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(2000),
             commit_deadline: HostTime(u64::MAX),
@@ -2596,6 +2654,7 @@ mod tests {
         let hit = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(5_001_000),
             commit_deadline: HostTime(u64::MAX),
@@ -2630,6 +2689,7 @@ mod tests {
         let hit = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(5_001_000),
             commit_deadline: HostTime(u64::MAX),
@@ -2677,6 +2737,7 @@ mod tests {
         let miss = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(2000),
             commit_deadline: HostTime(1500),
@@ -2710,6 +2771,7 @@ mod tests {
         let miss = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(2000),
             commit_deadline: HostTime(1500),
@@ -2744,6 +2806,7 @@ mod tests {
         let hit = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(2000),
             commit_deadline: HostTime(u64::MAX),
@@ -2789,6 +2852,7 @@ mod tests {
         let miss = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(2000),
             commit_deadline: HostTime(1500),
@@ -2823,6 +2887,7 @@ mod tests {
         let unknown = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(2_000),
             commit_deadline: HostTime(u64::MAX),
@@ -2860,6 +2925,7 @@ mod tests {
         let miss = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(2000),
             commit_deadline: HostTime(1500),
@@ -2887,6 +2953,7 @@ mod tests {
         let feedback = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(2000),
             commit_deadline: HostTime(u64::MAX),
@@ -2913,6 +2980,7 @@ mod tests {
         let overrun = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(2_000),
             commit_deadline: HostTime(u64::MAX),
@@ -2941,6 +3009,7 @@ mod tests {
         let overrun = PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(2_000),
             commit_deadline: HostTime(u64::MAX),

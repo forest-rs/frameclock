@@ -16,7 +16,9 @@ use crate::diagnostics::{
 };
 use crate::scheduler::{Scheduler, SchedulerConfig};
 use crate::time::{Duration, HostTime};
-use crate::timing::{FrameOpportunity, FramePlan, FrameTick, PresentFeedback, PresentHints};
+use crate::timing::{
+    BufferWait, FrameOpportunity, FramePlan, FrameTick, PresentFeedback, PresentHints,
+};
 
 /// A queued scheduler plan paired with the platform facts used to make it.
 ///
@@ -213,6 +215,9 @@ pub struct FrameSubmission {
     pub submitted_at: HostTime,
     /// Presentation evidence available for this submission.
     pub presentation: PresentationObservation,
+    /// How long the frame waited for a buffer to render into, if the host
+    /// measured it; see [`with_buffer_wait`](Self::with_buffer_wait).
+    pub buffer_wait: Option<BufferWait>,
 }
 
 impl FrameSubmission {
@@ -231,6 +236,7 @@ impl FrameSubmission {
                 Some(actual_present) => PresentationObservation::Actual(actual_present),
                 None => PresentationObservation::Unavailable,
             },
+            buffer_wait: None,
         }
     }
 
@@ -247,6 +253,7 @@ impl FrameSubmission {
         Self {
             submitted_at,
             presentation: PresentationObservation::Deferred,
+            buffer_wait: None,
         }
     }
 
@@ -258,7 +265,32 @@ impl FrameSubmission {
         Self {
             submitted_at,
             presentation: PresentationObservation::Reported,
+            buffer_wait: None,
         }
+    }
+
+    /// Returns these facts with how long the frame waited for a buffer to
+    /// render into: from `requested`, when it called `nextDrawable`,
+    /// `dequeueBuffer`, or `vkAcquireNextImageKHR`, to `acquired`, when that
+    /// returned.
+    ///
+    /// The wait is backpressure from frames queued ahead, not the frame's
+    /// work, so the scheduler leaves it out of build cost: otherwise a full
+    /// presentation pipeline would look like slow frames, and drop the
+    /// cadence or start frames earlier for it. A frame it made miss its
+    /// deadline does not deepen the pipeline either, which would only queue
+    /// more. Only the part of the wait after the frame began counts: a host
+    /// that acquires its buffer before beginning the frame should still
+    /// report it, and its summary carries it, but that time was never the
+    /// frame's.
+    #[inline]
+    #[must_use]
+    pub const fn with_buffer_wait(mut self, requested: HostTime, acquired: HostTime) -> Self {
+        self.buffer_wait = Some(BufferWait {
+            requested,
+            acquired,
+        });
+        self
     }
 
     /// Returns the immediate actual-present timestamp, if one is already
@@ -467,15 +499,34 @@ struct DeferredFrameFeedback {
     planned: PlannedFrame,
     build_start: HostTime,
     submitted_at: HostTime,
+    buffer_wait: Option<BufferWait>,
 }
 
 impl DeferredFrameFeedback {
-    const fn new(frame: ActiveFrame, submitted_at: HostTime) -> Self {
+    const fn new(frame: ActiveFrame, submission: FrameSubmission) -> Self {
         Self {
             planned: frame.planned,
             build_start: frame.build_start,
-            submitted_at,
+            submitted_at: submission.submitted_at,
+            buffer_wait: submission.buffer_wait,
         }
+    }
+
+    /// The feedback for this frame, with what became of it.
+    fn feedback(
+        &self,
+        work: Option<Duration>,
+        actual_present: Option<HostTime>,
+    ) -> PresentFeedback {
+        let mut feedback = PresentFeedback::with_work(
+            &self.planned.plan,
+            self.build_start,
+            self.submitted_at,
+            work,
+            actual_present,
+        );
+        feedback.buffer_wait = self.buffer_wait;
+        feedback
     }
 }
 
@@ -675,37 +726,26 @@ impl FrameDriver {
         frame: ActiveFrame,
         submission: FrameSubmission,
     ) -> FrameSubmitResult {
+        let held = DeferredFrameFeedback::new(frame, submission);
         match submission.presentation {
             PresentationObservation::Deferred => {
                 let summary = self.resolve_pending_feedback_as_unavailable();
-                self.pending_feedback =
-                    Some(DeferredFrameFeedback::new(frame, submission.submitted_at));
+                self.pending_feedback = Some(held);
                 FrameSubmitResult {
                     summary,
                     awaiting_actual_present: true,
                 }
             }
             PresentationObservation::Reported => {
-                let summary = self
-                    .hold_for_report(DeferredFrameFeedback::new(frame, submission.submitted_at));
+                let summary = self.hold_for_report(held);
                 FrameSubmitResult {
                     summary,
                     awaiting_actual_present: true,
                 }
             }
             PresentationObservation::Unavailable | PresentationObservation::Actual(_) => {
-                let feedback = PresentFeedback::new(
-                    &frame.plan(),
-                    frame.build_start(),
-                    submission.submitted_at,
-                    submission.actual_present(),
-                );
-                FrameSubmitResult::complete(self.finish_submitted_frame(
-                    frame.planned,
-                    frame.build_start,
-                    submission.submitted_at,
-                    &feedback,
-                ))
+                let feedback = held.feedback(None, submission.actual_present());
+                FrameSubmitResult::complete(self.finish_submitted_frame(&held, &feedback))
             }
         }
     }
@@ -736,19 +776,8 @@ impl FrameDriver {
             PresentOutcome::Presented(at) => Some(at),
             PresentOutcome::NotPresented | PresentOutcome::Unknown => None,
         };
-        let feedback = PresentFeedback::with_work(
-            &held.planned.plan,
-            held.build_start,
-            held.submitted_at,
-            report.work,
-            actual_present,
-        );
-        let mut summary = self.finish_submitted_frame(
-            held.planned,
-            held.build_start,
-            held.submitted_at,
-            &feedback,
-        );
+        let feedback = held.feedback(report.work, actual_present);
+        let mut summary = self.finish_submitted_frame(&held, &feedback);
         if report.outcome == PresentOutcome::NotPresented {
             summary.drop_reason = Some(FrameDropReason::NotPresented);
         }
@@ -768,18 +797,8 @@ impl FrameDriver {
             .min_by_key(|slot| slot.map_or(u64::MAX, |held| held.planned.plan.frame_index))
             .expect("the capacity is not zero");
         let evicted = oldest.replace(held).expect("every slot is taken");
-        let feedback = PresentFeedback::new(
-            &evicted.planned.plan,
-            evicted.build_start,
-            evicted.submitted_at,
-            None,
-        );
-        Some(self.finish_submitted_frame(
-            evicted.planned,
-            evicted.build_start,
-            evicted.submitted_at,
-            &feedback,
-        ))
+        let feedback = evicted.feedback(None, None);
+        Some(self.finish_submitted_frame(&evicted, &feedback))
     }
 
     fn resolve_deferred_feedback(
@@ -792,43 +811,23 @@ impl FrameDriver {
         let pending = self
             .pending_feedback
             .take_if(|pending| actual_present >= pending.submitted_at)?;
-        let feedback = PresentFeedback::new(
-            &pending.planned.plan,
-            pending.build_start,
-            pending.submitted_at,
-            Some(actual_present),
-        );
-        Some(self.finish_submitted_frame(
-            pending.planned,
-            pending.build_start,
-            pending.submitted_at,
-            &feedback,
-        ))
+        let feedback = pending.feedback(None, Some(actual_present));
+        Some(self.finish_submitted_frame(&pending, &feedback))
     }
 
     fn resolve_pending_feedback_as_unavailable(&mut self) -> Option<FrameTimingSummary> {
         let pending = self.pending_feedback.take()?;
-        let feedback = PresentFeedback::new(
-            &pending.planned.plan,
-            pending.build_start,
-            pending.submitted_at,
-            None,
-        );
-        Some(self.finish_submitted_frame(
-            pending.planned,
-            pending.build_start,
-            pending.submitted_at,
-            &feedback,
-        ))
+        let feedback = pending.feedback(None, None);
+        Some(self.finish_submitted_frame(&pending, &feedback))
     }
 
     fn finish_submitted_frame(
         &mut self,
-        planned: PlannedFrame,
-        build_start: HostTime,
-        submitted_at: HostTime,
+        held: &DeferredFrameFeedback,
         feedback: &PresentFeedback,
     ) -> FrameTimingSummary {
+        let (planned, build_start, submitted_at) =
+            (held.planned, held.build_start, held.submitted_at);
         let plan = planned.plan;
         let tick_event = FrameTickEvent::new(plan.frame_index, &planned.tick);
         let plan_event = FramePlanEvent::new(&plan, planned.safety_margin_ticks);
@@ -836,6 +835,7 @@ impl FrameDriver {
             frame_index: plan.frame_index,
             submitted_at,
             expected_present: feedback.expected_present,
+            buffer_wait: held.buffer_wait,
         };
         debug_assert_eq!(
             feedback.build_start, build_start,
@@ -1390,6 +1390,7 @@ mod tests {
             frame_index: plan.frame_index,
             submitted_at: submission.submitted_at,
             expected_present: expected_feedback.expected_present,
+            buffer_wait: None,
         };
         let feedback_event = PresentFeedbackEvent::new(plan.frame_index, &expected_feedback);
         let build_event = FrameBuildEvent {
@@ -1599,6 +1600,58 @@ mod tests {
 
         assert_eq!(driver.awaiting_reports(), 0);
         assert_eq!(driver.report_frame(indices[0], presented(100)), None);
+    }
+
+    #[test]
+    fn a_wait_for_a_buffer_is_not_build_cost() {
+        let margin_after = |submission: FrameSubmission| {
+            let mut driver = driver();
+            let frame = input_frame(&mut driver, 10);
+            let index = frame.plan().frame_index;
+            let _ = driver.submit_frame(frame, submission);
+            let summary = driver
+                .report_frame(
+                    index,
+                    FrameReport {
+                        work: None,
+                        outcome: PresentOutcome::Unknown,
+                    },
+                )
+                .expect("the frame is held");
+            (driver.scheduler().safety_margin_ticks(), summary)
+        };
+
+        // Built from 10 to 40, of which 22 went waiting for a buffer.
+        let (waited, summary) = margin_after(
+            FrameSubmission::reported(HostTime(40)).with_buffer_wait(HostTime(12), HostTime(34)),
+        );
+        let (worked, _) = margin_after(FrameSubmission::reported(HostTime(18)));
+        assert_eq!(waited, worked, "8 ticks of work either way");
+        assert_eq!(
+            summary.buffer_wait,
+            Some(BufferWait {
+                requested: HostTime(12),
+                acquired: HostTime(34),
+            })
+        );
+        assert_eq!(summary.buffer_wait.unwrap().duration(), Duration(22));
+    }
+
+    #[test]
+    fn a_deferred_frame_keeps_its_buffer_wait() {
+        let mut driver = driver();
+        let frame = input_frame(&mut driver, 10);
+        let _ = driver.submit_frame(
+            frame,
+            FrameSubmission::deferred(HostTime(30)).with_buffer_wait(HostTime(11), HostTime(25)),
+        );
+        let summary = driver
+            .resolve_pending_feedback_as_unavailable()
+            .expect("the frame was waiting");
+        assert_eq!(
+            summary.buffer_wait.map(BufferWait::duration),
+            Some(Duration(14))
+        );
     }
 
     #[test]
@@ -1909,6 +1962,7 @@ mod tests {
         driver.observe(&PresentFeedback {
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             submitted_at: HostTime(20),
             commit_deadline: HostTime(u64::MAX),

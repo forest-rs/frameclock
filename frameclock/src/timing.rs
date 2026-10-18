@@ -434,6 +434,28 @@ pub struct FramePlan {
     pub frame_index: u64,
 }
 
+/// How long a frame waited for a buffer to render into, such as in
+/// `nextDrawable`, `dequeueBuffer`, or `vkAcquireNextImageKHR`.
+///
+/// A frame blocks there when frames queued ahead hold every buffer: the
+/// presentation pipeline is full, so the program is ahead, not slow. The
+/// scheduler leaves the wait out of the frame's build cost.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BufferWait {
+    /// When the frame asked for a buffer.
+    pub requested: HostTime,
+    /// When it got one.
+    pub acquired: HostTime,
+}
+
+impl BufferWait {
+    /// Returns how long the frame waited.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        self.acquired.saturating_duration_since(self.requested)
+    }
+}
+
 /// Backend submission constraints carried by a [`FrameOpportunity`].
 ///
 /// Backends compute these from the current [`FrameTick`] and their own
@@ -712,6 +734,16 @@ pub struct PresentFeedback {
     /// so that frames already in flight when the depth changed do not
     /// count for or against the new one.
     pub pipeline_depth: Option<u8>,
+    /// When the frame waited for a buffer to render into, if the host
+    /// measured it; see [`BufferWait`].
+    ///
+    /// The part of the wait between [`build_start`](Self::build_start) and
+    /// [`submitted_at`](Self::submitted_at) was not the frame's own work, so
+    /// it is left out of [`build_cost`](Self::build_cost), and a frame
+    /// submitted after its deadline by no more than that was not built too
+    /// late. A wait outside that span, such as one before the frame began,
+    /// changes neither.
+    pub buffer_wait: Option<BufferWait>,
     /// What producing this frame cost beyond the host's own work, if the
     /// platform can say: a renderer that submits GPU work and returns
     /// reports how long that work took.
@@ -790,17 +822,44 @@ impl PresentFeedback {
         feedback
     }
 
-    /// What this frame cost to produce: the longer of the host's own span
+    /// What this frame cost to produce: the longer of the host's own span,
+    /// less the time in it the frame [waited for a buffer](Self::buffer_wait),
     /// and the [`work`](Self::work) its submission queued.
     #[must_use]
     pub fn build_cost(&self) -> Duration {
         let host = self
             .submitted_at
-            .saturating_duration_since(self.build_start);
+            .saturating_duration_since(self.build_start)
+            .saturating_sub(self.waited_while_building());
         match self.work {
             Some(work) if work > host => work,
             _ => host,
         }
+    }
+
+    /// How much of the frame's span from [`build_start`](Self::build_start)
+    /// to [`submitted_at`](Self::submitted_at) it spent waiting for a
+    /// buffer.
+    #[must_use]
+    pub fn waited_while_building(&self) -> Duration {
+        let Some(wait) = self.buffer_wait else {
+            return Duration::ZERO;
+        };
+        let from = wait.requested.max(self.build_start);
+        let to = wait.acquired.min(self.submitted_at);
+        to.saturating_duration_since(from)
+    }
+
+    /// Whether the frame was submitted after its deadline by more than it
+    /// waited for a buffer while building: whether its own work, not the
+    /// presentation pipeline's backpressure, made it late.
+    #[must_use]
+    pub fn built_late(&self) -> bool {
+        let work_done = self
+            .submitted_at
+            .checked_sub(self.waited_while_building())
+            .unwrap_or(self.build_start);
+        work_done > self.commit_deadline
     }
 
     /// Constructs feedback from already-normalized presentation hints.
@@ -864,6 +923,7 @@ impl PresentFeedback {
             starts_at_tick: hints.starts_at_tick(),
             present_latency: Duration::ZERO,
             pipeline_depth: None,
+            buffer_wait: None,
             work: None,
             expected_present,
             actual_present,
@@ -1059,6 +1119,53 @@ mod tests {
         );
 
         assert_eq!(hints.latest_commit(), HostTime(1_000_000));
+    }
+
+    fn spanning(build_start: u64, submitted_at: u64, wait: Option<(u64, u64)>) -> PresentFeedback {
+        let mut feedback = PresentFeedback::from_hints(
+            &PresentHints::pacing_only(HostTime(1_000)),
+            HostTime(build_start),
+            HostTime(submitted_at),
+            None,
+        );
+        feedback.buffer_wait = wait.map(|(requested, acquired)| BufferWait {
+            requested: HostTime(requested),
+            acquired: HostTime(acquired),
+        });
+        feedback
+    }
+
+    #[test]
+    fn only_a_wait_inside_the_build_comes_out_of_build_cost() {
+        // Built from 100 to 400.
+        assert_eq!(spanning(100, 400, None).build_cost(), Duration(300));
+        assert_eq!(
+            spanning(100, 400, Some((150, 250))).build_cost(),
+            Duration(200)
+        );
+        // A wait before the frame began is not its time.
+        assert_eq!(
+            spanning(100, 400, Some((0, 90))).build_cost(),
+            Duration(300)
+        );
+        // Only the part of a wait that overlaps the build.
+        assert_eq!(
+            spanning(100, 400, Some((50, 150))).build_cost(),
+            Duration(250)
+        );
+        // Out of order, or longer than the build.
+        assert_eq!(
+            spanning(100, 400, Some((250, 150))).build_cost(),
+            Duration(300)
+        );
+        assert_eq!(
+            spanning(100, 400, Some((0, 500))).build_cost(),
+            Duration::ZERO
+        );
+        // Reported work longer than what is left wins.
+        let mut worked = spanning(100, 400, Some((150, 350)));
+        worked.work = Some(Duration(120));
+        assert_eq!(worked.build_cost(), Duration(120));
     }
 
     fn plan_with_hints(hints: PresentHints) -> FramePlan {
