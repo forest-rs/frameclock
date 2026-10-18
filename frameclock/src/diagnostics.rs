@@ -99,6 +99,9 @@ pub struct FramePlanEvent {
     /// How much later the plan put the frame to drain a queued one; see
     /// [`FramePlan::held_back`].
     pub held_back: Duration,
+    /// Whether the frame was presented synchronously; see
+    /// [`FramePlan::synchronous`].
+    pub synchronous: bool,
     /// Current scheduler safety margin in host-time ticks.
     pub safety_margin_ticks: u64,
 }
@@ -121,6 +124,7 @@ impl FramePlanEvent {
             pipeline_depth: plan.pipeline_depth,
             present_latency: plan.present_latency,
             held_back: plan.held_back,
+            synchronous: plan.synchronous,
             safety_margin_ticks,
         }
     }
@@ -358,6 +362,10 @@ pub struct FrameTimingSummary {
     /// How much later the plan put the frame, to drain a frame queued in
     /// the presentation pipeline; see [`FramePlan::held_back`].
     pub held_back: Duration,
+    /// Whether the frame was presented synchronously, outside pacing, such
+    /// as for a window resize; see [`FramePlan::synchronous`]. Its deadline
+    /// is when it began, and it is not judged against it.
+    pub synchronous: bool,
     /// Scheduler safety margin used for the plan, in host-time ticks.
     pub safety_margin_ticks: u64,
     /// Scheduler adaptation state sampled for this frame, if recorded.
@@ -520,6 +528,7 @@ impl FrameTimingSummaryBuilder {
             pipeline_depth: plan.pipeline_depth,
             present_latency: plan.present_latency,
             held_back: plan.held_back,
+            synchronous: plan.synchronous,
             safety_margin_ticks: plan.safety_margin_ticks,
             scheduler_state,
         })
@@ -755,6 +764,7 @@ mod tests {
             pipeline_depth: 1,
             present_latency: Duration::ZERO,
             held_back: Duration::ZERO,
+            synchronous: false,
             safety_margin_ticks: 500,
         }
     }

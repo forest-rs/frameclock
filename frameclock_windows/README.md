@@ -128,6 +128,11 @@ image, so report any earlier frames they skipped over as
 `PresentOutcome::Unknown` too. The `frameclock` README's "Submitting Frames"
 table summarizes the choice.
 
+A resize shows its new size with the frame presented before `WM_SIZE` returns,
+or, with DirectComposition, in the same commit. Draw that frame with
+`FrameDriver::begin_synchronous_frame` there, rather than at the next tick;
+see the `frameclock` README's "Synchronous Frames".
+
 ## Timing Model
 
 QPC frequency is read once and cached for the lifetime of the process via

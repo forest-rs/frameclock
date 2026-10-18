@@ -14,6 +14,7 @@ use crate::diagnostics::{
     FrameTimingSummary, FrameTimingSummaryBuilder, PresentFeedbackEvent, SchedulerStateEvent,
     SubmitEvent,
 };
+use crate::output::OutputId;
 use crate::scheduler::{Scheduler, SchedulerConfig};
 use crate::time::{Duration, HostTime};
 use crate::timing::{
@@ -492,6 +493,8 @@ pub struct FrameDriver {
     /// in submission order.
     reported: [Option<DeferredFrameFeedback>; REPORTED_FRAME_CAPACITY],
     next_frame_index: u64,
+    /// The latest opportunity offered, for a synchronous frame's timing.
+    last_opportunity: Option<FrameOpportunity>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -547,6 +550,7 @@ impl FrameDriver {
             pending_feedback: None,
             reported: [None; REPORTED_FRAME_CAPACITY],
             next_frame_index: 0,
+            last_opportunity: None,
         }
     }
 
@@ -664,6 +668,7 @@ impl FrameDriver {
     /// instead and records a dropped-frame summary.
     #[must_use]
     pub fn begin_frame(&mut self, opportunity: FrameOpportunity) -> FrameBegin {
+        self.last_opportunity = Some(opportunity);
         let resolved_feedback =
             self.resolve_deferred_feedback(opportunity.tick.prev_actual_present);
         let result = self.take_next(opportunity);
@@ -672,6 +677,82 @@ impl FrameDriver {
             resolved_feedback,
             result,
         }
+    }
+
+    /// Begins a frame now, outside pacing, for a platform that waits for it.
+    ///
+    /// Some platforms show a window at a new size only with a frame drawn
+    /// at that size, and wait for it: macOS during a live resize, presenting
+    /// the drawable in the window's Core Animation transaction; Wayland,
+    /// acknowledging a configure with a buffer of the new size; Windows,
+    /// before `WM_SIZE` returns. That frame cannot wait for a tick. A frame
+    /// drawn later shows the old content stretched or cropped, and the
+    /// window's edge ahead of it.
+    ///
+    /// The frame starts at `now` and takes the place of a queued frame, and
+    /// of the demand waiting to be planned: it draws the latest state. It
+    /// samples for the first refresh from `now` on that the latest
+    /// opportunity predicts, or for `now` when none does. Submit it as any
+    /// other frame. Its summary says it was
+    /// [synchronous](FrameTimingSummary::synchronous), and its feedback
+    /// teaches the scheduler nothing: presented when the platform asked for
+    /// it, it says nothing about how paced frames are built and shown.
+    #[must_use]
+    pub fn begin_synchronous_frame(&mut self, now: HostTime) -> ActiveFrame {
+        let queued = self
+            .pending_frame
+            .take()
+            .map_or(FrameDemand::NONE, |frame| frame.plan.demand);
+        let demand = self.pending_demand | queued;
+        self.pending_demand = FrameDemand::NONE;
+
+        let last = self.last_opportunity;
+        let interval = last
+            .and_then(|opportunity| {
+                opportunity
+                    .tick
+                    .refresh_interval
+                    .filter(|interval| !interval.is_zero())
+                    .or_else(|| {
+                        Some(opportunity.display_timing.min_interval())
+                            .filter(|interval| !interval.is_zero())
+                    })
+            })
+            .unwrap_or(self.scheduler.config().nominal_latency);
+        let target = last
+            .filter(|opportunity| opportunity.hints.presentation_timing().has_target_present())
+            .and_then(|opportunity| opportunity.tick.predicted_present)
+            .map(|predicted| next_refresh(predicted, interval, now));
+        let hints = match target {
+            Some(target) => PresentHints::predictive(target, now),
+            None => PresentHints::pacing_only(now),
+        };
+        let output = last.map_or(OutputId::default(), |opportunity| opportunity.tick.output);
+        let tick = FrameTick {
+            now,
+            predicted_present: target,
+            refresh_interval: Some(interval),
+            output,
+            prev_actual_present: None,
+        };
+        let plan = FramePlan {
+            demand,
+            frame_interval: interval,
+            frame_start: now,
+            starts_at_tick: false,
+            sample_time: target.unwrap_or(now),
+            target_present: target,
+            presentation_timing: hints.presentation_timing(),
+            commit_deadline: now,
+            pipeline_depth: self.scheduler.pipeline_depth(),
+            present_latency: Duration::ZERO,
+            held_back: Duration::ZERO,
+            synchronous: true,
+            output,
+            frame_index: 0,
+        };
+        let planned = PlannedFrame::new(tick, plan, hints, self.scheduler.safety_margin_ticks());
+        ActiveFrame::new(self.consume_frame_index(planned), now)
     }
 
     /// Begins the queued frame from the host's own wake, without a new tick.
@@ -855,9 +936,18 @@ impl FrameDriver {
             feedback.build_start, build_start,
             "submitted frame summary must use feedback for the same build start"
         );
-        let feedback_event = PresentFeedbackEvent::new(plan.frame_index, feedback);
-
-        self.scheduler.observe(feedback);
+        let feedback_event = if plan.synchronous {
+            // Presented by the platform's own rules, a synchronous frame's
+            // latency and deadline say nothing about paced frames, so the
+            // scheduler does not learn from it, and it is not judged.
+            let mut unjudged = *feedback;
+            unjudged.missed_deadline = None;
+            unjudged.pacing_overrun = None;
+            PresentFeedbackEvent::new(plan.frame_index, &unjudged)
+        } else {
+            self.scheduler.observe(feedback);
+            PresentFeedbackEvent::new(plan.frame_index, feedback)
+        };
 
         let state_event = SchedulerStateEvent {
             state: self.scheduler.state(),
@@ -1048,6 +1138,19 @@ impl FrameDriver {
     pub fn observe(&mut self, feedback: &PresentFeedback) {
         self.scheduler.observe(feedback);
     }
+}
+
+/// The first refresh at or after `now` of a display that refreshes every
+/// `interval` from `predicted`.
+fn next_refresh(predicted: HostTime, interval: Duration, now: HostTime) -> HostTime {
+    if predicted >= now || interval.is_zero() {
+        return predicted.max(now);
+    }
+    let behind = now.saturating_duration_since(predicted).ticks();
+    let refreshes = behind.div_ceil(interval.ticks());
+    predicted
+        .checked_add(interval.saturating_mul(refreshes))
+        .unwrap_or(now)
 }
 
 #[cfg(test)]
@@ -2341,6 +2444,93 @@ mod tests {
         };
         assert_eq!(frame.plan().target_present, None);
         assert_eq!(frame.plan().sample_time, HostTime(1_200));
+    }
+
+    #[test]
+    fn a_synchronous_frame_starts_now_in_place_of_the_queued_frame() {
+        let mut driver = driver();
+        driver.request(FrameDemand::ANIMATION);
+        assert!(matches!(
+            driver
+                .begin_frame(predictive_opportunity(1_000, 0, 1_100, 1_090))
+                .result,
+            FrameBeginResult::Wait(_)
+        ));
+        driver.request(FrameDemand::BACKGROUND);
+
+        // A resize, between ticks, after the predicted refresh.
+        let frame = driver.begin_synchronous_frame(HostTime(1_150));
+        let plan = frame.plan();
+        assert!(plan.synchronous);
+        assert_eq!(plan.frame_start, HostTime(1_150));
+        assert_eq!(frame.build_start(), HostTime(1_150));
+        assert_eq!(
+            plan.demand,
+            FrameDemand::ANIMATION | FrameDemand::BACKGROUND
+        );
+        // The refresh after the one predicted.
+        assert_eq!(plan.target_present, Some(HostTime(1_200)));
+        assert_eq!(plan.sample_time, HostTime(1_200));
+        assert_eq!(plan.frame_index, 0);
+        assert!(driver.pending_frame().is_none());
+        assert!(!driver.has_pending_demand());
+    }
+
+    #[test]
+    fn a_synchronous_frame_teaches_the_scheduler_nothing() {
+        let mut driver = driver();
+        driver.request(FrameDemand::ANIMATION);
+        let _ = driver.begin_frame(predictive_opportunity(1_000, 0, 1_100, 1_090));
+        let before = driver.scheduler().state();
+
+        let frame = driver.begin_synchronous_frame(HostTime(1_150));
+        // Long to draw, and shown long after.
+        let submit = driver.submit_frame(
+            frame,
+            FrameSubmission::new(HostTime(1_900), Some(HostTime(2_500))),
+        );
+        let summary = submit.summary.expect("an actual present resolves now");
+        assert!(summary.synchronous);
+        assert_eq!(summary.missed_deadline, None);
+        assert_eq!(summary.pacing_overrun, None);
+        assert_eq!(summary.actual_present, Some(HostTime(2_500)));
+        assert_eq!(driver.scheduler().state(), before);
+    }
+
+    #[test]
+    fn a_synchronous_frame_before_any_tick_samples_now() {
+        let mut driver = driver();
+        let frame = driver.begin_synchronous_frame(HostTime(500));
+        assert!(frame.plan().synchronous);
+        assert_eq!(frame.plan().target_present, None);
+        assert_eq!(frame.plan().sample_time, HostTime(500));
+        assert_eq!(frame.plan().demand, FrameDemand::NONE);
+        assert_eq!(frame.plan().output, OutputId::default());
+    }
+
+    #[test]
+    fn the_next_refresh_follows_the_predicted_ones() {
+        let interval = Duration(100);
+        assert_eq!(
+            next_refresh(HostTime(1_100), interval, HostTime(1_050)),
+            HostTime(1_100)
+        );
+        assert_eq!(
+            next_refresh(HostTime(1_100), interval, HostTime(1_100)),
+            HostTime(1_100)
+        );
+        assert_eq!(
+            next_refresh(HostTime(1_100), interval, HostTime(1_101)),
+            HostTime(1_200)
+        );
+        assert_eq!(
+            next_refresh(HostTime(1_100), interval, HostTime(1_450)),
+            HostTime(1_500)
+        );
+        assert_eq!(
+            next_refresh(HostTime(1_100), Duration::ZERO, HostTime(1_450)),
+            HostTime(1_450)
+        );
     }
 
     #[test]

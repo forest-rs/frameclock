@@ -763,6 +763,7 @@ impl Scheduler {
             pipeline_depth: self.pipeline_depth,
             present_latency,
             held_back,
+            synchronous: false,
             output: tick.output,
             frame_index,
         }
@@ -1125,6 +1126,12 @@ impl Scheduler {
         self.misses = MissWindow::default();
         self.consecutive_hits = 0;
         self.shallower_fits = 0;
+    }
+
+    /// Returns the configuration the scheduler was created with.
+    #[must_use]
+    pub const fn config(&self) -> &SchedulerConfig {
+        &self.config
     }
 
     /// Returns the current pipeline depth.

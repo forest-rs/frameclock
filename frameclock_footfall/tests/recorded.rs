@@ -182,6 +182,7 @@ fn summary_with_wait(frame_index: u64, buffer_wait: Option<BufferWait>) -> Frame
             pipeline_depth: 2,
             present_latency: Duration(60),
             held_back: Duration::ZERO,
+            synchronous: false,
             safety_margin_ticks: 300,
         },
     );
@@ -406,6 +407,31 @@ fn a_frame_held_back_to_drain_the_queue_says_so() {
             LabelValue::Unsigned(125_000)
         )])),
     );
+}
+
+#[test]
+fn a_synchronous_frame_records_nothing_to_judge_it_by() {
+    let (backend, _serial) = recording();
+    let mut resize = summary(8);
+    resize.synchronous = true;
+    Recorder::new(MACH).record(&resize);
+
+    let kinds: Vec<_> = taken(backend)
+        .into_iter()
+        .filter_map(|seen| match seen {
+            Seen::Point(_, kind, ..) => Some(kind),
+            _ => None,
+        })
+        .collect();
+    for judged in [
+        FramePointKind::Predicted,
+        FramePointKind::Deadline,
+        FramePointKind::Target,
+    ] {
+        assert!(!kinds.contains(&judged), "{judged:?} in {kinds:?}");
+    }
+    assert!(kinds.contains(&FramePointKind::Sampled));
+    assert!(kinds.contains(&FramePointKind::Presented));
 }
 
 #[test]

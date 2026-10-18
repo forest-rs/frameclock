@@ -258,6 +258,35 @@ would drop the cadence or start frames earlier for it. Nor does a frame the wait
 made miss its deadline deepen the pipeline, which would only queue more. The
 frame's summary carries the wait as a `BufferWait`.
 
+## Synchronous Frames
+
+Some platforms show a window at a new size only with a frame drawn at that size,
+and wait for it: macOS during a live resize, presenting the drawable in the
+window's Core Animation transaction; Wayland, acknowledging a configure with a
+buffer of the new size; Windows, before `WM_SIZE` returns. That frame cannot
+wait for a tick, and a frame drawn later shows old content stretched or
+cropped, with the window's edge ahead of it.
+
+Begin it with `FrameDriver::begin_synchronous_frame(now)` where the platform
+asks for it, draw and present it there, and submit it as any other frame:
+
+```rust,ignore
+// In the platform's resize callback, before it returns.
+let frame = driver.begin_synchronous_frame(now());
+// Draw at the new size for frame.sample_time(), and present it as the
+// platform requires.
+let _ = driver.submit_frame(frame, submission);
+```
+
+The frame takes the place of a queued frame and the demand behind it, since it
+draws the latest state, and samples for the next refresh the latest tick
+predicts. Its summary is `synchronous`. Presented when the platform asked for
+it rather than when the scheduler planned, it teaches the scheduler nothing, so
+a resize leaves the learned build cost, latency, depth, and queue drain as they
+were, and it is not judged against a deadline. A host that keeps drawing paced
+frames during a resize draws them at the new size too; one that draws only
+synchronous frames while the platform resizes lets ticks go idle.
+
 ## Display Timing And VRR
 
 `DisplayTiming::fixed(interval)` is the right model when a backend has only a

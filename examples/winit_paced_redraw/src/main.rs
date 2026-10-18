@@ -192,6 +192,33 @@ impl WindowState {
         self.surface_clock.driver.begin_frame(opportunity).result
     }
 
+    /// Draws the frame for a new window size now, outside pacing.
+    fn draw_synchronous(&mut self, started_at: Instant) {
+        let now = host_time(started_at);
+        // It takes the place of any queued frame, so that frame's wake is
+        // no longer due.
+        self.cancel_frame_start_wake();
+        let frame = self.surface_clock.driver.begin_synchronous_frame(now);
+        let plan = frame.plan();
+        let work_mode = WorkMode::LatencySensitive;
+        self.model.update_for_frame(plan.sample_time, work_mode);
+        let submission = self.renderer.render(work_mode, now);
+        // The driver learns nothing from it, so a resize leaves the pacing of
+        // later frames as it was.
+        let summary = self
+            .surface_clock
+            .driver
+            .submit_frame(frame, submission)
+            .summary;
+        debug_assert!(
+            summary.is_some_and(|summary| summary.synchronous),
+            "a pacing-only submission resolves at once, as synchronous"
+        );
+        if self.model.animation_active {
+            self.request_frame(FrameDemand::ANIMATION);
+        }
+    }
+
     fn redraw(&mut self, started_at: Instant, event_loop: &ActiveEventLoop) {
         // Frameclock uses an explicit monotonic host timeline. A real app would
         // usually centralize this conversion so renderer and platform feedback
@@ -240,7 +267,7 @@ impl WindowState {
         // `plan.sample_time`, not wall-clock "now", so CPU work targets the
         // frame that is expected to be displayed. `plan.demand` is the demand
         // that selected this frame; the app can use it to choose workload
-        // quality. Resize/scroll frames might skip optional refinement, while
+        // quality. Scrolling frames might skip optional refinement, while
         // animation frames can take the normal visual path.
         let work_mode = WorkMode::from_demand(plan.demand);
         self.model.update_for_frame(plan.sample_time, work_mode);
@@ -415,9 +442,10 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Resized(_) => {
                 if let Some(window) = &mut self.window {
-                    // Treat resize as continuous input: it is latency-sensitive,
-                    // but can still step down if rendering becomes too slow.
-                    window.request_frame(FrameDemand::CONTINUOUS_INPUT);
+                    // The platform shows the new size with a frame drawn at
+                    // it, and on macOS a live resize waits for that frame here:
+                    // draw it now rather than at the next planned frame.
+                    window.draw_synchronous(self.started_at);
                 }
             }
             WindowEvent::RedrawRequested => {

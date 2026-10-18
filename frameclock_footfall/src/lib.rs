@@ -264,6 +264,11 @@ impl Recorder {
     /// `present_latency_ns`. A frame the scheduler held back a refresh to
     /// drain a queued one says so on its sampled point, as `held_back_ns`.
     ///
+    /// A [synchronous](FrameTimingSummary::synchronous) frame, such as one
+    /// for a window resize, was presented when the platform asked for it,
+    /// outside pacing, so it records no prediction, deadline, or target to
+    /// be judged by.
+    ///
     /// Every drop is recorded with its reason, including frames the host
     /// discarded or superseded itself; Footfall's analysis counts only some
     /// reasons as misses. `NotPresented` stays
@@ -285,7 +290,10 @@ impl Recorder {
             FramePointKind::Scheduled(begins_at),
             summary.frame_start,
         ));
-        if let Some(at) = summary.predicted_present {
+        // A synchronous frame was presented when the platform asked for it,
+        // outside pacing: it had no deadline or target to be judged by.
+        let paced = !summary.synchronous;
+        if let Some(at) = summary.predicted_present.filter(|_| paced) {
             footfall_core::frame_point(&self.at(number, FramePointKind::Predicted, at).with_args(
                 Args::none().with(
                     "presentation_timing",
@@ -304,12 +312,14 @@ impl Recorder {
                 "present_latency_ns",
                 self.nanos(summary.present_latency.ticks()),
             );
-        footfall_core::frame_point(
-            &self
-                .at(number, FramePointKind::Deadline, summary.commit_deadline)
-                .with_args(plan),
-        );
-        if let Some(at) = summary.target_present {
+        if paced {
+            footfall_core::frame_point(
+                &self
+                    .at(number, FramePointKind::Deadline, summary.commit_deadline)
+                    .with_args(plan),
+            );
+        }
+        if let Some(at) = summary.target_present.filter(|_| paced) {
             footfall_core::frame_point(&self.at(number, FramePointKind::Target, at));
         }
         let sampled = self.at(number, FramePointKind::Sampled, summary.sample_time);

@@ -302,6 +302,43 @@ With the main thread idle, every link skipped 9 refreshes or fewer. A render
 thread does not help a frame that blocks it, such as in `nextDrawable`: report
 that wait with `FrameSubmission::with_buffer_wait`.
 
+## Resizing
+
+During a live resize, AppKit shows the window's new size in a Core Animation
+transaction, and content drawn at a later tick reaches the screen after the
+window's edge has moved: it shows the old frame stretched, or the window's
+background. Draw the frame for the new size where AppKit resizes the view, such
+as in `setFrameSize:`, `layout`, or `updateLayer`, on the main thread, and
+present it in that transaction:
+
+```rust,ignore
+// The view's size changed. Wait for frames already queued for the GPU, so
+// none lands after this one at the old size.
+let flush = queue.commandBuffer().unwrap();
+flush.commit();
+flush.waitUntilCompleted();
+layer.setDrawableSize(new_pixel_size);
+
+let frame = driver.begin_synchronous_frame(frameclock_apple::now());
+layer.setPresentsWithTransaction(true);
+let drawable = layer.nextDrawable().unwrap();
+// Encode the frame for frame.sample_time() into `buffer`, then:
+buffer.commit();
+buffer.waitUntilScheduled();
+drawable.present();
+layer.setPresentsWithTransaction(false);
+let submission = AppleFeedbackMode::Reported.submission(frameclock_apple::now());
+let _ = driver.submit_frame(frame, submission);
+```
+
+With `presentsWithTransaction`, `present` joins the Core Animation transaction
+of the thread that calls it, so call it on the main thread, where AppKit
+commits the resize, even in a host that otherwise renders on a thread of its
+own. Such a host can let its render thread encode and commit the frame while
+the main thread waits, then present it from the main thread. Report the
+drawable's `presentedTime` as for any other frame. The scheduler learns nothing
+from a synchronous frame, so a resize leaves its pacing as it was.
+
 ## Metal Display Link
 
 With the `metal-display-link` feature, `CaMetalDisplayLink` drives a
